@@ -1074,6 +1074,60 @@ check_architecture_issues() {
 }
 
 ################################################################################
+# iSCSI Session Checks (Compute/UAN)
+# Reference: Customer advisory for worker node rebuild/rollout
+################################################################################
+
+check_iscsi_sessions() {
+    print_header "iSCSI Session Checks (Compute/UAN)"
+    
+    print_check "Collecting iSCSI sessions from compute/UAN nodes"
+    if command -v kubectl &> /dev/null; then
+        WORKER_NODES=$(kubectl get nodes -l iscsi=sbps -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}' 2>/dev/null)
+        if [ -z "$WORKER_NODES" ]; then
+            print_warning "No worker nodes found with label iscsi=sbps"
+            log_message "       Run: kubectl get nodes -l iscsi=sbps"
+        else
+            NODE_COUNT=$(echo "$WORKER_NODES" | wc -w | tr -d ' ')
+            print_info "Found $NODE_COUNT worker nodes with iscsi=sbps label"
+            log_message "       Worker node list used for expected iSCSI session targets"
+        fi
+
+        COMPUTE_NODES=""
+        UAN_NODES=""
+        if command -v sat &> /dev/null; then
+            COMPUTE_NODES=$(sat status --fields xname --filter 'Role=Compute' 2>/dev/null | awk 'NF' | tr '\n' ' ')
+            log_message "       Source: sat status --fields xname --filter 'Role=Compute'"
+            UAN_NODES=$(sat status --fields xname --filter 'Role=Application' 2>/dev/null | awk 'NF' | tr '\n' ' ')
+            log_message "       Source: sat status --fields xname --filter 'Role=Application'"
+        else
+            print_warning "sat not available; cannot list compute nodes in this environment"
+        fi
+
+        COMPUTE_NODES=$(echo "$COMPUTE_NODES" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
+        UAN_NODES=$(echo "$UAN_NODES" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
+        COMPUTE_UAN_NODES=$(echo "$COMPUTE_NODES $UAN_NODES" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
+        if [ -z "$COMPUTE_UAN_NODES" ]; then
+            print_warning "No compute or UAN nodes found"
+            log_message "       Expected sources: sat status --fields xname --filter 'Role=Compute' and sat status --fields xname --filter 'Role=Application'"
+        else
+            for node in $COMPUTE_UAN_NODES; do
+                print_info "Node: $node"
+                if ssh -o BatchMode=yes -o ConnectTimeout=5 "$node" "command -v iscsiadm" &> /dev/null; then
+                    SESSION_COUNT=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$node" "iscsiadm -m session 2>/dev/null | wc -l" | tr -d ' ')
+                    log_message "       iscsiadm -m session count: ${SESSION_COUNT:-0}"
+                else
+                    print_warning "iscsiadm not available on $node or SSH failed"
+                fi
+            done
+            print_info "Customer guidance: delete iSCSI sessions for worker nodes being rebuilt/rolled out from all compute/UAN nodes"
+        fi
+    else
+        print_warning "kubectl not available, cannot list worker nodes"
+    fi
+}
+
+################################################################################
 # Summary Report
 ################################################################################
 
@@ -1148,6 +1202,7 @@ main() {
     check_sma_issues
     check_uss_issues
     check_architecture_issues
+    check_iscsi_sessions
     
     # Print summary
     print_summary
