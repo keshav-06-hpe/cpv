@@ -1085,11 +1085,11 @@ check_iscsi_sessions() {
     if command -v kubectl &> /dev/null; then
         WORKER_NODES=$(kubectl get nodes -l iscsi=sbps -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}' 2>/dev/null)
         if [ -z "$WORKER_NODES" ]; then
-            print_warning "No worker nodes found with label iscsi=sbps"
+            print_info "No worker nodes found with label iscsi=sbps"
             log_message "       Run: kubectl get nodes -l iscsi=sbps"
         else
             NODE_COUNT=$(echo "$WORKER_NODES" | wc -w | tr -d ' ')
-            print_info "Found $NODE_COUNT worker nodes with iscsi=sbps label"
+            print_warning "Found $NODE_COUNT worker nodes with iscsi=sbps label"
             log_message "       Worker node list used for expected iSCSI session targets"
         fi
 
