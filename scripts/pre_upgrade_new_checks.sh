@@ -318,6 +318,8 @@ check_spire_health() {
         if [ "$INITIALIZING" -gt 0 ]; then
             print_warning "$INITIALIZING Spire pods stuck in PodInitializing state"
             log_message "       Reference: troubleshooting/known_issues/spire_pod_initializing.md"
+        else
+            print_pass "No Spire pods stuck in PodInitializing"
         fi
         
         # Check for postgres issues
@@ -325,6 +327,8 @@ check_spire_health() {
         if [ "$POSTGRES_SPIRE" -gt 0 ]; then
             print_fail "Spire PostgreSQL pods not running"
             log_message "       Reference: troubleshooting/known_issues/spire_postgres_*.md"
+        else
+            print_pass "Spire PostgreSQL pods healthy"
         fi
     fi
 }
@@ -499,7 +503,7 @@ check_hms_services() {
     print_header "HMS Services Validation"
     
     # Critical HMS services from hpe-csm-scripts
-    HMS_SERVICES=("bss:cray-bss" "capmc:cray-capmc" "fas:cray-firmware-action" \
+    HMS_SERVICES=("bss:cray-bss" "capmc:cray-capmc" "fas:cray-fas" \
                   "hbtd:cray-hbtd" "hmnfd:cray-hmnfd" "hsm:cray-smd" \
                   "pcs:cray-power-control" "scsd:cray-scsd" "sls:cray-sls")
     
@@ -664,7 +668,7 @@ check_csm_17_specific() {
     # Check 3: etcd health (critical for 1.7)
     print_check "Checking etcd cluster health"
     if command -v kubectl &> /dev/null; then
-        ETCD_PODS=$(kubectl get pods -n kube-system 2>/dev/null | grep etcd | grep Running | wc -l)
+        ETCD_PODS=$(kubectl get pods -A 2>/dev/null | grep etcd | grep Running | wc -l)
         if [ "$ETCD_PODS" -lt 3 ]; then
             print_fail "etcd cluster unhealthy (expected 3+ pods, found $ETCD_PODS)"
             kubectl get pods -n kube-system | grep etcd | tee -a "$LOG_FILE"
@@ -695,15 +699,15 @@ check_csm_17_specific() {
         print_info "Cannot check certificate expiration (not on master node?)"
     fi
     
-    # Check 5: CSI tool configuration
-    print_check "Checking for CSI tool configuration"
-    if [ -f "/etc/cray/csi/config.yaml" ]; then
-        print_info "CSI configuration found - review for version 1.7 changes"
-        log_message "       Reference: introduction/csi_Tool_Changes.md"
-        log_message "       Note: CSI tool behavior changes in CSM 1.7"
-    else
-        print_info "No CSI configuration found (may be expected)"
-    fi
+    # # Check 5: CSI tool configuration
+    # print_check "Checking for CSI tool configuration"
+    # if [ -f "/etc/cray/csi/config.yaml" ]; then
+    #     print_info "CSI configuration found - review for version 1.7 changes"
+    #     log_message "       Reference: introduction/csi_Tool_Changes.md"
+    #     log_message "       Note: CSI tool behavior changes in CSM 1.7"
+    # else
+    #     print_info "No CSI configuration found (may be expected)"
+    # fi
     
     # Check 6: Vault token cleanup
     print_check "Checking Vault token configuration"
@@ -1010,7 +1014,8 @@ check_system_prerequisites() {
             print_pass "No running BOS sessions"
         fi
     fi
-    
+
+    # Check 2: Check for running CFS sessions
     print_check "Checking for running CFS sessions"
     if command -v cray &> /dev/null; then
         RUNNING_CFS=$(cray cfs sessions list --format json 2>/dev/null | grep -c "running")
@@ -1022,7 +1027,7 @@ check_system_prerequisites() {
         fi
     fi
     
-    # Check 2: Documentation packages
+    # Check 3: Documentation packages
     print_check "Checking for latest documentation packages"
     if [ -f "/root/docs-csm-latest.noarch.rpm" ] && [ -f "/root/libcsm-latest.noarch.rpm" ]; then
         print_pass "Documentation RPMs found in /root"
@@ -1031,14 +1036,14 @@ check_system_prerequisites() {
         log_message "       Ensure docs-csm-latest.noarch.rpm and libcsm-latest.noarch.rpm are available"
     fi
     
-    # Check 3: HSM duplicate events
+    # Check 4: HSM duplicate events
     print_check "Checking for HSM duplicate detected events"
     if command -v kubectl &> /dev/null; then
         print_info "Run duplicate event cleanup if upgrading from older CSM versions"
         log_message "       See: Remove_Duplicate_Detected_Events_From_HSM_Postgres_Database.md"
     fi
     
-    # Check 4: Switch admin password in vault
+    # Check 5: Switch admin password in vault
     print_check "Checking switch admin password in vault"
     if command -v kubectl &> /dev/null; then
         SWITCH_PASS=$(kubectl get secret -n vault network-switch-password 2>/dev/null)
@@ -1096,9 +1101,9 @@ check_iscsi_sessions() {
         COMPUTE_NODES=""
         UAN_NODES=""
         if command -v sat &> /dev/null; then
-            COMPUTE_NODES=$(sat status --fields xname --filter 'Role=Compute' 2>/dev/null | awk 'NF' | tr '\n' ' ')
+            COMPUTE_NODES=$(sat status --fields xname --filter 'Role=Compute' --no-borders --no-headings 2>/dev/null | awk 'NF' | tr '\n' ' ')
             log_message "       Source: sat status --fields xname --filter 'Role=Compute'"
-            UAN_NODES=$(sat status --fields xname --filter 'Role=Application' 2>/dev/null | awk 'NF' | tr '\n' ' ')
+            UAN_NODES=$(sat status --fields xname --filter 'Role=Application' --no-borders --no-headings 2>/dev/null | awk 'NF' | tr '\n' ' ')
             log_message "       Source: sat status --fields xname --filter 'Role=Application'"
         else
             print_warning "sat not available; cannot list compute nodes in this environment"
