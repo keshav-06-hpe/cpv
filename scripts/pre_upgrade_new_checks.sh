@@ -367,7 +367,7 @@ check_postgres_health() {
     print_check "Checking Patroni cluster health"
     if command -v kubectl &> /dev/null; then
         # Format: "cluster-name:namespace"
-        POSTGRES_CLUSTERS=("keycloak-postgres:services" "gitea-vcs-postgres:services" "spire-postgres:spire")
+        POSTGRES_CLUSTERS=("keycloak-postgres:services" "gitea-vcs-postgres:services" "cray-spire-postgres:spire")
         PATRONI_ISSUES=0
 
         for CLUSTER_INFO in "${POSTGRES_CLUSTERS[@]}"; do
@@ -598,7 +598,7 @@ check_hardware_health() {
         print_warning "Cray CLI not available, cannot check HSM state"
         log_message "       Install cray CLI or run on management node"
     fi
-    
+
     # Check 2: Redfish endpoint discovery
     print_check "Checking Redfish endpoint discovery status"
     if command -v kubectl &> /dev/null; then
@@ -610,28 +610,27 @@ check_hardware_health() {
             print_pass "HMS discovery service job completed"
         fi
     fi
-    
+
     # Check 3: CAPMC hardware checks availability
     print_check "Checking CAPMC service for hardware validation"
-    if command -v helm &> /dev/null; then
-        if helm list -n services 2>/dev/null | grep -q cray-hms-capmc; then
-            print_info "CAPMC available - hardware checks can be run post-check"
+    if command -v kubectl &> /dev/null; then
+        CAPMC_PODS=$(kubectl get pods -n services 2>/dev/null | grep cray-capmc | grep Running | wc -l)
+        if [ "$CAPMC_PODS" -gt 0 ]; then
+            print_pass "CAPMC service running ($CAPMC_PODS pods)"
             log_message "       Optional: Run /opt/cray/csm/scripts/hms_verification/run_hardware_checks.sh"
             log_message "       This validates CAPMC and HSM hardware checks"
         else
-            print_warning "CAPMC not found - hardware validation limited"
+            CAPMC_DEPLOYED=$(kubectl get deployment -n services cray-capmc 2>/dev/null)
+            if [ -n "$CAPMC_DEPLOYED" ]; then
+                print_warning "CAPMC deployment exists but no running pods"
+                kubectl get pods -n services | grep cray-capmc | tee -a "$LOG_FILE"
+            else
+                print_warning "CAPMC not found - hardware validation limited"
+            fi
         fi
     fi
-    
-    # Check 4: Power state consistency
-    print_check "Checking for component power state mismatches"
-    if command -v cray &> /dev/null; then
-        print_info "Verify no power state mismatches in HSM"
-        log_message "       Use: cray hsm state components list --format json | jq '.Components[] | select(.State != .DesiredState)'"
-        log_message "       Reference: troubleshooting/known_issues/component_power_state_mismatch.md"
-    fi
-    
-    # Check 5: BMC/Controller connectivity
+
+    # Check 4: BMC/Controller connectivity
     print_check "Checking BMC/Controller reachability"
     if command -v kubectl &> /dev/null; then
         HMNFD_PODS=$(kubectl get pods -n services 2>/dev/null | grep cray-hmnfd | grep Running | wc -l)
@@ -651,7 +650,7 @@ check_hardware_health() {
 
 check_csm_17_specific() {
     print_header "CSM 1.7 Specific Pre-Checks"
-    
+
     # Check 1: CNI migration readiness (Weave → Cilium)
     print_check "Checking current CNI (Weave → Cilium migration in 1.7)"
     if command -v kubectl &> /dev/null; then
@@ -669,7 +668,7 @@ check_csm_17_specific() {
             fi
         fi
     fi
-    
+
     # Check 2: BSS global metadata for Cilium
     print_check "Checking BSS global metadata for Cilium migration"
     if command -v cray &> /dev/null; then
@@ -692,18 +691,32 @@ check_csm_17_specific() {
         print_warning "Cray CLI not available, cannot check BSS metadata"
     fi
     
-    # Check 3: etcd health (critical for 1.7)
-    print_check "Checking etcd cluster health"
+    # Check 3: Service etcd clusters
+    print_check "Checking HMS service etcd clusters"
     if command -v kubectl &> /dev/null; then
-        ETCD_PODS=$(kubectl get pods -A 2>/dev/null | grep etcd | grep Running | wc -l)
-        if [ "$ETCD_PODS" -lt 3 ]; then
-            print_fail "etcd cluster unhealthy (expected 3+ pods, found $ETCD_PODS)"
-            kubectl get pods -n kube-system | grep etcd | tee -a "$LOG_FILE"
+        HMS_ETCD_SERVICES=("cray-bss" "cray-fas" "cray-fox" "cray-hbtd" "cray-hmnfd" "cray-power-control")
+        ETCD_ISSUES=0
+
+        for SERVICE in "${HMS_ETCD_SERVICES[@]}"; do
+            ETCD_COUNT=$(kubectl get pods -n services 2>/dev/null | grep "${SERVICE}-bitnami-etcd-" | grep -v snapshotter | grep Running | wc -l)
+            if [ "$ETCD_COUNT" -lt 3 ]; then
+                if [ "$ETCD_COUNT" -eq 0 ]; then
+                    print_info "${SERVICE} etcd cluster not found (service may not be installed)"
+                else
+                    print_warning "${SERVICE} etcd cluster has only ${ETCD_COUNT}/3 pods running"
+                    kubectl get pods -n services | grep "${SERVICE}-bitnami-etcd-" | grep -v snapshotter | tee -a "$LOG_FILE"
+                    ETCD_ISSUES=$((ETCD_ISSUES + 1))
+                fi
+            fi
+        done
+
+        if [ "$ETCD_ISSUES" -eq 0 ]; then
+            print_pass "All HMS service etcd clusters healthy"
         else
-            print_pass "etcd cluster healthy ($ETCD_PODS pods)"
+            log_message "       Reference: operations/validate_csm_health/"
         fi
     fi
-    
+
     # Check 4: Certificate validity
     print_check "Checking Kubernetes certificate expiration"
     if [ -f "/etc/kubernetes/pki/apiserver.crt" ]; then
@@ -725,7 +738,7 @@ check_csm_17_specific() {
     else
         print_info "Cannot check certificate expiration (not on master node?)"
     fi
-    
+
     # Check 5: Vault token cleanup
     print_check "Checking Vault token configuration"
     if command -v kubectl &> /dev/null; then
@@ -736,115 +749,68 @@ check_csm_17_specific() {
 }
 
 ################################################################################
-# CSM Diags Checks
-################################################################################
-
-check_csm_diags_issues() {
-    print_header "CSM Diags Issues"
-    
-    # Check 1: AllowedRAMSpace setting (for Slurm systems)
-    print_check "Checking for Slurm AllowedRAMSpace configuration"
-    SLURM_NODES=$(kubectl get nodes -l slurm=true 2>/dev/null | tail -n +2 | wc -l)
-    if [ "$SLURM_NODES" -gt 0 ]; then
-        print_warning "Slurm nodes detected. Ensure AllowedRAMSpace=100 in /etc/slurm/cgroup.conf on compute nodes"
-        log_message "       This must be set before running CSM Diags"
-        log_message "       Related: CASMDIAG-1733, CASMDIAG-1655"
-    else
-        print_info "No Slurm nodes detected, skipping AllowedRAMSpace check"
-    fi
-    
-    # Check 2: Multi-tenancy check
-    print_check "Checking if CSM Diags is installed (for multi-tenancy upgrade)"
-    if [ -d "/opt/csm-diags" ] || kubectl get deployment -n csm-diags 2>/dev/null | grep -q csm-diags; then
-        print_warning "CSM Diags appears to be installed. If upgrading to multi-tenancy, uninstall first."
-        log_message "       Run uninstall.sh from CSM Diags tarball directory"
-        log_message "       Then run switch_to_multitenancy.sh before repackaging"
-        log_message "       Related: CASMDIAG-1732"
-    else
-        print_pass "CSM Diags not currently installed"
-    fi
-}
-
-################################################################################
-# HFP Checks
-################################################################################
-
-check_hfp_issues() {
-    print_header "Hardware Firmware Pack (HFP) Issues"
-    
-    # Check 1: EX254n blade firmware
-    print_check "Checking for EX254n blade firmware (CcNc)"
-    if command -v cray &> /dev/null; then
-        # This is a simplified check - actual implementation would query FAS
-        print_warning "If you have EX254n blades, ensure CcNc firmware is NOT version 1.10.1-12"
-        log_message "       HFP 25.7.1 uses version 1.9.9-46 (safe version)"
-        log_message "       Query FAS for current firmware versions: cray fas images list"
-    else
-        print_warning "Cray CLI not available, cannot check firmware versions"
-    fi
-}
-
-################################################################################
 # SHS (Slingshot Host Software) Checks
 ################################################################################
 
-check_shs_issues() {
-    print_header "Slingshot Host Software (SHS) Issues"
+####### Commenting for future use #######
+
+# check_shs_issues() {
+#     print_header "Slingshot Host Software (SHS) Issues"
+
+#     # Check 1: SS10 systems
+#     print_check "Checking for SS10 hardware"
+#     if command -v cray &> /dev/null; then
+#         if check_command "jq" "jq not available, cannot parse HSM inventory for SS10"; then
+#             SS10_COUNT=$(cray hsm inventory hardware list --format json 2>/dev/null | jq -r '.. | .Model? // empty' | grep -ci "SS10")
+#             if [ -z "$SS10_COUNT" ]; then
+#                 print_warning "Unable to determine SS10 presence from HSM inventory"
+#             elif [ "$SS10_COUNT" -gt 0 ]; then
+#                 print_warning "Detected SS10 hardware in inventory"
+#                 log_message "       Continue using SHS-v12.0.x (SHS 13.0.0 not supported)"
+#                 log_message "       Related: Issue - SS10 Not Supported"
+#             else
+#                 print_pass "No SS10 hardware detected in inventory"
+#             fi
+#         fi
+#     else
+#         print_info "Cray CLI not available; cannot check SS10 hardware"
+#     fi
     
-    # Check 1: SS10 systems
-    print_check "Checking for SS10 hardware"
-    if command -v cray &> /dev/null; then
-        if check_command "jq" "jq not available, cannot parse HSM inventory for SS10"; then
-            SS10_COUNT=$(cray hsm inventory hardware list --format json 2>/dev/null | jq -r '.. | .Model? // empty' | grep -ci "SS10")
-            if [ -z "$SS10_COUNT" ]; then
-                print_warning "Unable to determine SS10 presence from HSM inventory"
-            elif [ "$SS10_COUNT" -gt 0 ]; then
-                print_warning "Detected SS10 hardware in inventory"
-                log_message "       Continue using SHS-v12.0.x (SHS 13.0.0 not supported)"
-                log_message "       Related: Issue - SS10 Not Supported"
-            else
-                print_pass "No SS10 hardware detected in inventory"
-            fi
-        fi
-    else
-        print_info "Cray CLI not available; cannot check SS10 hardware"
-    fi
+#     # Check 2: High rank count applications
+#     print_check "Checking for affected Slurm/PALS versions (>252 ranks per node issue)"
+#     AFFECTED=false
+#     if command -v scontrol &> /dev/null; then
+#         SLURM_VERSION=$(scontrol version 2>/dev/null | head -1)
+#         if [[ "$SLURM_VERSION" == *"25.05"* ]]; then
+#             AFFECTED=true
+#             log_message "       Slurm 25.05 detected"
+#         fi
+#     fi
+#     if command -v pals &> /dev/null; then
+#         PALS_VERSION=$(pals --version 2>/dev/null | head -1)
+#         if [[ "$PALS_VERSION" == *"1.7.1"* ]]; then
+#             AFFECTED=true
+#             log_message "       PALS 1.7.1 detected"
+#         fi
+#     fi
+#     if [ "$AFFECTED" = true ]; then
+#         print_warning "Affected Slurm/PALS versions detected"
+#         log_message "       Jobs with >252 ranks per node may hit libfabric RGID sharing errors"
+#         log_message "       Consider earlier Slurm/PALS versions until resolved"
+#         log_message "       Related: Issue 2160777, SLURM/PALS >252 Ranks Issue"
+#     else
+#         print_pass "No affected Slurm/PALS versions detected"
+#         log_message "       Note: workload rank counts are not detectable pre-run"
+#     fi
     
-    # Check 2: High rank count applications
-    print_check "Checking for affected Slurm/PALS versions (>252 ranks per node issue)"
-    AFFECTED=false
-    if command -v scontrol &> /dev/null; then
-        SLURM_VERSION=$(scontrol version 2>/dev/null | head -1)
-        if [[ "$SLURM_VERSION" == *"25.05"* ]]; then
-            AFFECTED=true
-            log_message "       Slurm 25.05 detected"
-        fi
-    fi
-    if command -v pals &> /dev/null; then
-        PALS_VERSION=$(pals --version 2>/dev/null | head -1)
-        if [[ "$PALS_VERSION" == *"1.7.1"* ]]; then
-            AFFECTED=true
-            log_message "       PALS 1.7.1 detected"
-        fi
-    fi
-    if [ "$AFFECTED" = true ]; then
-        print_warning "Affected Slurm/PALS versions detected"
-        log_message "       Jobs with >252 ranks per node may hit libfabric RGID sharing errors"
-        log_message "       Consider earlier Slurm/PALS versions until resolved"
-        log_message "       Related: Issue 2160777, SLURM/PALS >252 Ranks Issue"
-    else
-        print_pass "No affected Slurm/PALS versions detected"
-        log_message "       Note: workload rank counts are not detectable pre-run"
-    fi
-    
-    # Check 3: CXI services
-    print_check "Checking CXI service configuration"
-    if command -v cxi_service &> /dev/null; then
-        print_info "CXI service utility found"
-        print_warning "Note: VNI updates on existing CXI services NOT supported in SHS 13.0"
-        log_message "       Related: Issue 3110032"
-    fi
-}
+#     # Check 3: CXI services
+#     print_check "Checking CXI service configuration"
+#     if command -v cxi_service &> /dev/null; then
+#         print_info "CXI service utility found"
+#         print_warning "Note: VNI updates on existing CXI services NOT supported in SHS 13.0"
+#         log_message "       Related: Issue 3110032"
+#     fi
+# }
 
 ################################################################################
 # Slingshot Fabric Checks
@@ -852,7 +818,7 @@ check_shs_issues() {
 
 check_slingshot_issues() {
     print_header "Slingshot Fabric Issues"
-    
+
     # Check 1: Certificate Manager Keystore
     print_check "Checking Slingshot Certificate Manager keystore health"
     if [ -d "/var/opt/cray/slingshot" ]; then
@@ -865,7 +831,7 @@ check_slingshot_issues() {
             print_pass "Filesystem space acceptable for certificate operations"
         fi
     fi
-    
+
     # Check 2: Velero backups
     print_check "Checking Slingshot fabric backup status"
     if command -v kubectl &> /dev/null; then
@@ -887,7 +853,7 @@ check_slingshot_issues() {
 
 check_sma_issues() {
     print_header "System Monitoring Application (SMA) Issues"
-    
+
     # Check 1: Helm releases in uninstalling state
     print_check "Checking for stuck Helm releases"
     if command -v helm &> /dev/null; then
@@ -901,7 +867,7 @@ check_sma_issues() {
             print_pass "No Helm releases stuck in uninstalling state"
         fi
     fi
-    
+
     # Check 2: OpenSearch pods
     print_check "Checking OpenSearch pod health"
     if command -v kubectl &> /dev/null; then
@@ -914,7 +880,7 @@ check_sma_issues() {
             print_pass "OpenSearch pods healthy"
         fi
     fi
-    
+
     # Check 3: Kafka topics
     print_check "Checking for required Kafka topics"
     if command -v kubectl &> /dev/null; then
@@ -957,61 +923,63 @@ check_sma_issues() {
 # USS (User Services Software) Checks
 ################################################################################
 
-check_uss_issues() {
-    print_header "User Services Software (USS) Issues"
+##### Can keep for future #######
+
+# check_uss_issues() {
+#     print_header "User Services Software (USS) Issues"
     
-    # Check 1: PBS configuration
-    print_check "Checking PBS Professional configuration"
-    if command -v pbsnodes &> /dev/null; then
-        PBS_VERSION=$(pbsnodes --version 2>/dev/null | head -1)
-        print_info "PBS detected: $PBS_VERSION"
-        if [[ "$PBS_VERSION" == *"2024"* ]]; then
-            print_warning "PBS 2024 detected - check for PALS launch issues"
-            log_message "       See Section 13.12.3 PBS PALS launches fail"
-        fi
-        if [[ "$PBS_VERSION" == *"2025.2"* ]]; then
-            print_warning "PBS 2025.2 detected - PBS_cray_atom hook may fail"
-            log_message "       See Section 13.12.4 for http+unix URL scheme issue"
-        fi
-    fi
+#     # Check 1: PBS configuration
+#     print_check "Checking PBS Professional configuration"
+#     if command -v pbsnodes &> /dev/null; then
+#         PBS_VERSION=$(pbsnodes --version 2>/dev/null | head -1)
+#         print_info "PBS detected: $PBS_VERSION"
+#         if [[ "$PBS_VERSION" == *"2024"* ]]; then
+#             print_warning "PBS 2024 detected - check for PALS launch issues"
+#             log_message "       See Section 13.12.3 PBS PALS launches fail"
+#         fi
+#         if [[ "$PBS_VERSION" == *"2025.2"* ]]; then
+#             print_warning "PBS 2025.2 detected - PBS_cray_atom hook may fail"
+#             log_message "       See Section 13.12.4 for http+unix URL scheme issue"
+#         fi
+#     fi
     
-    # Check 2: Slurm configuration
-    print_check "Checking Slurm configuration"
-    if command -v scontrol &> /dev/null; then
-        SLURM_VERSION=$(scontrol version 2>/dev/null | head -1)
-        print_info "Slurm detected: $SLURM_VERSION"
-        if [[ "$SLURM_VERSION" == *"24.05"* ]]; then
-            print_warning "Slurm 24.05 detected - Instant On support may cause slurmctld failure"
-            log_message "       Update default configuration after upgrade"
-            log_message "       See Section 13.14.6 slurmctld fails to start"
-        fi
-    fi
+#     # Check 2: Slurm configuration
+#     print_check "Checking Slurm configuration"
+#     if command -v scontrol &> /dev/null; then
+#         SLURM_VERSION=$(scontrol version 2>/dev/null | head -1)
+#         print_info "Slurm detected: $SLURM_VERSION"
+#         if [[ "$SLURM_VERSION" == *"24.05"* ]]; then
+#             print_warning "Slurm 24.05 detected - Instant On support may cause slurmctld failure"
+#             log_message "       Update default configuration after upgrade"
+#             log_message "       See Section 13.14.6 slurmctld fails to start"
+#         fi
+#     fi
     
-    # Check 3: cos-config-service
-    print_check "Checking for cos-config-service (to be removed)"
-    if command -v helm &> /dev/null; then
-        if helm list -n services 2>/dev/null | grep -q cos-config-service; then
-            print_warning "cos-config-service is installed and will NOT be auto-removed"
-            log_message "       Must manually uninstall after upgrade:"
-            log_message "       helm uninstall -n services cos-config-service"
-        else
-            print_pass "cos-config-service not installed (expected for new installs)"
-        fi
-    fi
+#     # Check 3: cos-config-service
+#     print_check "Checking for cos-config-service (to be removed)"
+#     if command -v helm &> /dev/null; then
+#         if helm list -n services 2>/dev/null | grep -q cos-config-service; then
+#             print_warning "cos-config-service is installed and will NOT be auto-removed"
+#             log_message "       Must manually uninstall after upgrade:"
+#             log_message "       helm uninstall -n services cos-config-service"
+#         else
+#             print_pass "cos-config-service not installed (expected for new installs)"
+#         fi
+#     fi
     
-    # Check 4: NMD configuration
-    print_check "Checking Node Memory Dump (NMD) configuration"
-    print_info "If your system has nodes with >80GB memory dumps, update S3 chunk size to 128MB"
-    log_message "       See Section 8.4 Compute node dump upload failure"
+#     # Check 4: NMD configuration
+#     print_check "Checking Node Memory Dump (NMD) configuration"
+#     print_info "If your system has nodes with >80GB memory dumps, update S3 chunk size to 128MB"
+#     log_message "       See Section 8.4 Compute node dump upload failure"
     
-    # Check 5: GPU PTX compilation
-    print_check "Checking NVIDIA GPU SDK/Driver compatibility"
-    if [ -d "/opt/nvidia/hpc_sdk" ]; then
-        print_warning "NVIDIA SDK 25.5 (CUDA 12.9) with Driver 570.124.06 (CUDA 12.8) has PTX JIT issues"
-        log_message "       Use CUDA 11.8 modulefiles and paths instead of CUDA 12.9"
-        log_message "       Both versions are in NVIDIA 25.5 SDK"
-    fi
-}
+#     # Check 5: GPU PTX compilation
+#     print_check "Checking NVIDIA GPU SDK/Driver compatibility"
+#     if [ -d "/opt/nvidia/hpc_sdk" ]; then
+#         print_warning "NVIDIA SDK 25.5 (CUDA 12.9) with Driver 570.124.06 (CUDA 12.8) has PTX JIT issues"
+#         log_message "       Use CUDA 11.8 modulefiles and paths instead of CUDA 12.9"
+#         log_message "       Both versions are in NVIDIA 25.5 SDK"
+#     fi
+# }
 
 ################################################################################
 # System Prerequisites
