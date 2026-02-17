@@ -587,7 +587,7 @@ check_hardware_health() {
     # Check 2: Redfish endpoint discovery
     print_check "Checking Redfish endpoint discovery status"
     if command -v kubectl &> /dev/null; then
-        HMS_DISCOVERY=$(kubectl get pods -n services 2>/dev/null | grep hms-discovery | grep Running | wc -l)
+        HMS_DISCOVERY=$(kubectl get pods -n services 2>/dev/null | grep hms-discovery | grep Completed | wc -l)
         if [ "$HMS_DISCOVERY" -eq 0 ]; then
             print_fail "HMS discovery service not running"
             log_message "       Hardware discovery may be impacted during upgrade"
@@ -658,9 +658,21 @@ check_csm_17_specific() {
     # Check 2: BSS global metadata for Cilium
     print_check "Checking BSS global metadata for Cilium migration"
     if command -v cray &> /dev/null; then
-        print_info "Verify k8s_primary_cni is set in BSS global metadata"
-        log_message "       Command: cray bss bootparameters list --name Global"
-        log_message "       Required to prevent: Cilium Migration Failure"
+        BSS_METADATA=$(cray bss bootparameters list --name Global 2>/dev/null)
+        if echo "$BSS_METADATA" | grep -q "k8s-primary-cni"; then
+            K8S_CNI_VALUE=$(echo "$BSS_METADATA" | grep "k8s-primary-cni" | sed 's/.*k8s-primary-cni[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/' | head -1)
+            if [ "$K8S_CNI_VALUE" = "cilium" ]; then
+                print_pass "k8s-primary-cni correctly set to 'cilium' in BSS global metadata"
+            else
+                print_fail "k8s-primary-cni is set to '$K8S_CNI_VALUE' but must be 'cilium'"
+                log_message "       Run: cray bss bootparameters update --name Global"
+                log_message "       Required to prevent: Cilium Migration Failure"
+            fi
+        else
+            print_fail "k8s-primary-cni NOT found in BSS global metadata"
+            log_message "       Run: cray bss bootparameters list --name Global"
+            log_message "       Required to prevent: Cilium Migration Failure"
+        fi
     else
         print_warning "Cray CLI not available, cannot check BSS metadata"
     fi
@@ -699,17 +711,7 @@ check_csm_17_specific() {
         print_info "Cannot check certificate expiration (not on master node?)"
     fi
     
-    # # Check 5: CSI tool configuration
-    # print_check "Checking for CSI tool configuration"
-    # if [ -f "/etc/cray/csi/config.yaml" ]; then
-    #     print_info "CSI configuration found - review for version 1.7 changes"
-    #     log_message "       Reference: introduction/csi_Tool_Changes.md"
-    #     log_message "       Note: CSI tool behavior changes in CSM 1.7"
-    # else
-    #     print_info "No CSI configuration found (may be expected)"
-    # fi
-    
-    # Check 6: Vault token cleanup
+    # Check 5: Vault token cleanup
     print_check "Checking Vault token configuration"
     if command -v kubectl &> /dev/null; then
         print_info "Ensure cray-vault-operator tokens are cleaned up"
