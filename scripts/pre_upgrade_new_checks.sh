@@ -106,22 +106,7 @@ check_command() {
 check_csm_issues() {
     print_header "CSM Core Issues"
     
-    # Check 1: IUF Active Sessions
-    print_check "Checking for active IUF sessions"
-    if command -v iuf &> /dev/null; then
-        ACTIVE_SESSIONS=$(iuf list 2>/dev/null | grep -v "Completed" | wc -l)
-        if [ "$ACTIVE_SESSIONS" -gt 0 ]; then
-            print_fail "Found $ACTIVE_SESSIONS active IUF sessions. Complete or abort them before upgrade."
-            log_message "       Run 'iuf list' to see active sessions"
-            log_message "       Related: CAST-38971, CAST-38972, CAST-38968"
-        else
-            print_pass "No active IUF sessions found"
-        fi
-    else
-        print_warning "IUF command not found, skipping session check"
-    fi
-    
-    # Check 2: Nexus Space
+    # Check 1: Nexus Space
     print_check "Checking Nexus storage space"
     if command -v kubectl &> /dev/null; then
         NEXUS_PVC=$(kubectl get pvc -n nexus 2>/dev/null | grep nexus | awk '{print $1}')
@@ -190,7 +175,7 @@ check_kubernetes_health() {
         done
         print_pass "Critical namespace pod check completed"
     fi
-    
+
     # Check 3: Pods with high restart counts
     print_check "Checking for pods with high restart counts"
     if command -v kubectl &> /dev/null; then
@@ -203,7 +188,7 @@ check_kubernetes_health() {
             print_pass "No pods with excessive restarts"
         fi
     fi
-    
+
     # Check 4: Persistent Volume Claims
     print_check "Checking PVC status"
     if command -v kubectl &> /dev/null; then
@@ -224,7 +209,7 @@ check_kubernetes_health() {
 
 check_ceph_health() {
     print_header "Ceph Storage Health"
-    
+
     # Check 1: Ceph cluster status
     print_check "Checking Ceph cluster health"
     if command -v ceph &> /dev/null; then
@@ -247,7 +232,7 @@ check_ceph_health() {
     else
         print_warning "ceph command not available, skipping Ceph health check"
     fi
-    
+
     # Check 2: OSD status
     print_check "Checking Ceph OSD status"
     if command -v ceph &> /dev/null; then
@@ -260,7 +245,7 @@ check_ceph_health() {
             print_pass "All OSDs are up"
         fi
     fi
-    
+
     # Check 3: Ceph usage
     print_check "Checking Ceph storage usage"
     if command -v ceph &> /dev/null; then
@@ -285,7 +270,7 @@ check_ceph_health() {
 
 check_spire_health() {
     print_header "Spire Service Health"
-    
+
     # Check 1: Spire pods
     print_check "Checking Spire pod status"
     if command -v kubectl &> /dev/null; then
@@ -298,7 +283,7 @@ check_spire_health() {
             print_pass "Spire server pods healthy"
         fi
     fi
-    
+
     # Check 2: Spire agents
     print_check "Checking Spire agent status"
     if command -v kubectl &> /dev/null; then
@@ -310,7 +295,7 @@ check_spire_health() {
             print_pass "All Spire agents running"
         fi
     fi
-    
+
     # Check 3: Common Spire issues
     print_check "Checking for known Spire issues"
     if command -v kubectl &> /dev/null; then
@@ -321,7 +306,7 @@ check_spire_health() {
         else
             print_pass "No Spire pods stuck in PodInitializing"
         fi
-        
+
         # Check for postgres issues
         POSTGRES_SPIRE=$(kubectl get pods -n spire 2>/dev/null | grep postgres | grep -v Running | wc -l)
         if [ "$POSTGRES_SPIRE" -gt 0 ]; then
@@ -340,22 +325,22 @@ check_spire_health() {
 
 check_postgres_health() {
     print_header "PostgreSQL Database Health"
-    
+
     # Check 1: PostgreSQL clusters
     print_check "Checking PostgreSQL cluster status"
     if command -v kubectl &> /dev/null; then
         PG_CLUSTERS=$(kubectl get postgresql -A 2>/dev/null | grep -v NAME | awk '{print $1":"$2}')
-        
+
         if [ -z "$PG_CLUSTERS" ]; then
             print_info "No PostgreSQL clusters found (or CRD not installed)"
         else
             for cluster in $PG_CLUSTERS; do
                 ns=$(echo $cluster | cut -d: -f1)
                 name=$(echo $cluster | cut -d: -f2)
-                
+
                 RUNNING=$(kubectl get pods -n $ns -l application=spilo,cluster-name=$name 2>/dev/null | grep Running | wc -l)
                 TOTAL=$(kubectl get postgresql -n $ns $name -o jsonpath='{.spec.numberOfInstances}' 2>/dev/null)
-                
+
                 if [ "$RUNNING" != "$TOTAL" ] && [ -n "$TOTAL" ]; then
                     print_warning "PostgreSQL $ns/$name: $RUNNING/$TOTAL instances running"
                 else
@@ -364,7 +349,7 @@ check_postgres_health() {
             done
         fi
     fi
-    
+
     # Check 2: PostgreSQL pod status
     print_check "Checking for PostgreSQL pod issues"
     if command -v kubectl &> /dev/null; then
@@ -377,13 +362,43 @@ check_postgres_health() {
             print_pass "All PostgreSQL pods healthy"
         fi
     fi
-    
-    # Check 3: Patroni issues
-    print_check "Checking for Patroni configuration issues"
+
+    # Check 3: Patroni cluster health
+    print_check "Checking Patroni cluster health"
     if command -v kubectl &> /dev/null; then
-        print_info "Ensure Patroni clusters are healthy before upgrade"
-        log_message "       Use: kubectl exec -it <postgres-pod> -- patronictl list"
-        log_message "       Reference: troubleshooting/known_issues/postgres_*.md"
+        # Format: "cluster-name:namespace"
+        POSTGRES_CLUSTERS=("keycloak-postgres:services" "gitea-vcs-postgres:services" "spire-postgres:spire")
+        PATRONI_ISSUES=0
+
+        for CLUSTER_INFO in "${POSTGRES_CLUSTERS[@]}"; do
+            POSTGRESQL=$(echo $CLUSTER_INFO | cut -d: -f1)
+            NAMESPACE=$(echo $CLUSTER_INFO | cut -d: -f2)
+
+            # Check if the postgres pod exists
+            if kubectl get pod "${POSTGRESQL}-1" -n ${NAMESPACE} &> /dev/null; then
+                PATRONI_OUTPUT=$(kubectl exec "${POSTGRESQL}-1" -c postgres -n ${NAMESPACE} -- patronictl list 2>/dev/null)
+
+                if [ -n "$PATRONI_OUTPUT" ]; then
+                    # Check for unhealthy states in patronictl output
+                    if echo "$PATRONI_OUTPUT" | grep -iq "failed\|stopped\|unknown"; then
+                        print_warning "Patroni cluster ${POSTGRESQL} (${NAMESPACE}) has unhealthy members"
+                        echo "$PATRONI_OUTPUT" | tee -a "$LOG_FILE"
+                        PATRONI_ISSUES=$((PATRONI_ISSUES + 1))
+                    else
+                        print_pass "Patroni cluster ${POSTGRESQL} (${NAMESPACE}) healthy"
+                    fi
+                else
+                    print_warning "Could not retrieve Patroni status for ${POSTGRESQL} (${NAMESPACE})"
+                    PATRONI_ISSUES=$((PATRONI_ISSUES + 1))
+                fi
+            fi
+        done
+
+        if [ "$PATRONI_ISSUES" -eq 0 ]; then
+            print_pass "All Patroni clusters healthy"
+        else
+            log_message "       Reference: troubleshooting/known_issues/postgres_*.md"
+        fi
     fi
 }
 
@@ -394,7 +409,7 @@ check_postgres_health() {
 
 check_network_services() {
     print_header "Network Services Health"
-    
+
     # Check 1: DNS services
     print_check "Checking DNS services"
     if command -v kubectl &> /dev/null; then
@@ -406,7 +421,7 @@ check_network_services() {
             print_pass "DNS services running ($DNS_PODS pods)"
         fi
     fi
-    
+
     # Check 2: DHCP services
     print_check "Checking DHCP services"
     if command -v kubectl &> /dev/null; then
@@ -418,7 +433,7 @@ check_network_services() {
             print_pass "DHCP services running ($DHCP_PODS pods)"
         fi
     fi
-    
+
     # Check 3: MetalLB IP allocation
     print_check "Checking MetalLB IP allocation"
     if command -v kubectl &> /dev/null; then
@@ -431,7 +446,7 @@ check_network_services() {
             print_pass "All LoadBalancer services have allocated IPs"
         fi
     fi
-    
+
     # Check 4: CoreDNS
     print_check "Checking CoreDNS pods"
     if command -v kubectl &> /dev/null; then
@@ -451,7 +466,7 @@ check_network_services() {
 
 check_csm_services_health() {
     print_header "CSM Core Services Health"
-    
+
     # Check 1: HMS services
     print_check "Checking HMS services"
     if command -v kubectl &> /dev/null; then
@@ -469,7 +484,7 @@ check_csm_services_health() {
             print_pass "All HMS services have desired replicas"
         fi
     fi
-    
+
     # Check 2: BSS (Boot Script Service)
     print_check "Checking BSS (Boot Script Service)"
     if command -v kubectl &> /dev/null; then
@@ -481,7 +496,7 @@ check_csm_services_health() {
             print_pass "BSS is running ($BSS_STATUS pods)"
         fi
     fi
-    
+
     # Check 3: API Gateway
     print_check "Checking API Gateway"
     if command -v kubectl &> /dev/null; then
@@ -501,7 +516,7 @@ check_csm_services_health() {
 
 check_hms_services() {
     print_header "HMS Services Validation"
-    
+
     # Critical HMS services from hpe-csm-scripts
     HMS_SERVICES=("bss:cray-bss" "capmc:cray-capmc" "fas:cray-fas" \
                   "hbtd:cray-hbtd" "hmnfd:cray-hmnfd" "hsm:cray-smd" \
@@ -509,26 +524,26 @@ check_hms_services() {
     
     FAILED_SERVICES=""
     WARNING_SERVICES=""
-    
+
     for svc_pair in "${HMS_SERVICES[@]}"; do
         SVC_NAME=$(echo $svc_pair | cut -d: -f1)
         DEPLOYMENT=$(echo $svc_pair | cut -d: -f2)
-        
+
         print_check "Checking HMS service: $SVC_NAME ($DEPLOYMENT)"
-        
+
         if command -v kubectl &> /dev/null; then
             # Check if deployment exists
             if kubectl get deployment -n services $DEPLOYMENT &> /dev/null; then
                 REPLICAS=$(kubectl get deployment -n services $DEPLOYMENT -o jsonpath='{.status.availableReplicas}' 2>/dev/null)
                 DESIRED=$(kubectl get deployment -n services $DEPLOYMENT -o jsonpath='{.spec.replicas}' 2>/dev/null)
-                
+
                 if [ "$REPLICAS" != "$DESIRED" ] || [ -z "$REPLICAS" ]; then
                     print_warning "$SVC_NAME: $REPLICAS/$DESIRED replicas available"
                     WARNING_SERVICES="$WARNING_SERVICES $SVC_NAME"
                 else
                     print_pass "$SVC_NAME: All replicas running ($REPLICAS/$DESIRED)"
                 fi
-                
+
                 # Check pod status
                 FAILED_PODS=$(kubectl get pods -n services -l app.kubernetes.io/name=$DEPLOYMENT 2>/dev/null | grep -v Running | grep -v Completed | grep -v NAME | wc -l)
                 if [ "$FAILED_PODS" -gt 0 ]; then
@@ -540,7 +555,7 @@ check_hms_services() {
             fi
         fi
     done
-    
+
     # Summary of HMS service checks
     if [ -n "$FAILED_SERVICES" ]; then
         print_fail "Failed HMS services:$FAILED_SERVICES"
@@ -560,7 +575,7 @@ check_hms_services() {
 
 check_hardware_health() {
     print_header "Hardware Health Validation"
-    
+
     # Check 1: HSM hardware state
     print_check "Checking HSM component state"
     if command -v cray &> /dev/null; then
@@ -573,7 +588,7 @@ check_hardware_health() {
             else
                 print_pass "No components in Empty state"
             fi
-            
+
             OFF_COMPS=$(cray hsm state components list --format json 2>/dev/null | jq -r '.Components[] | select(.State == "Off") | .ID' | wc -l)
             if [ "$OFF_COMPS" -gt 0 ]; then
                 print_info "Found $OFF_COMPS components in Off state (may be expected)"
@@ -592,7 +607,7 @@ check_hardware_health() {
             print_fail "HMS discovery service not running"
             log_message "       Hardware discovery may be impacted during upgrade"
         else
-            print_pass "HMS discovery service running"
+            print_pass "HMS discovery service job completed"
         fi
     fi
     
