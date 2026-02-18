@@ -114,75 +114,58 @@ fix_hsm_duplicate_events() {
         return
     fi
     
-    # Check if spire-postgres pod exists
-    POSTGRES_POD=$(kubectl get pods -n spire -l app=postgres 2>/dev/null | grep -v NAME | awk '{print $1}' | head -1)
+    # Use official CSM scripts for HSM duplicate event cleanup
+    # Reference: https://github.com/Cray-HPE/docs-csm/blob/release/1.6/operations/hardware_state_manager/Remove_Duplicate_Detected_Events_From_HSM_Postgres_Database.md
     
-    if [ -z "$POSTGRES_POD" ]; then
-        print_info "Checking alternative postgres locations..."
-        # Try to find postgres in other namespaces
-        POSTGRES_POD=$(kubectl get pods -A -l app.kubernetes.io/name=postgresql 2>/dev/null | grep -v NAME | awk '{print $1}' | head -1)
-        POSTGRES_NS=$(kubectl get pods -A -l app.kubernetes.io/name=postgresql 2>/dev/null | grep -v NAMESPACE | awk '{print $1}' | head -1)
-    else
-        POSTGRES_NS="spire"
-    fi
+    HWINV_SCRIPT_DIR="/usr/share/doc/csm/upgrade/scripts/upgrade/smd"
     
-    if [ -z "$POSTGRES_POD" ]; then
-        print_skipped "No PostgreSQL pod found for HSM"
+    # Check if scripts exist
+    if [ ! -d "$HWINV_SCRIPT_DIR" ]; then
+        print_warning "HSM cleanup scripts not found at: $HWINV_SCRIPT_DIR"
+        print_info "These scripts are included in the CSM documentation package"
+        print_info "Location: /usr/share/doc/csm/upgrade/scripts/upgrade/smd/"
+        print_info "Scripts needed:"
+        log_message "  - fru_history_backup.sh"
+        log_message "  - fru_history_remove_duplicate_detected_events.sh"
+        print_skipped "Official CSM scripts not available - manual execution required"
         return
     fi
     
-    print_info "Found PostgreSQL pod: $POSTGRES_POD in namespace: $POSTGRES_NS"
+    print_info "Found HSM cleanup scripts at: $HWINV_SCRIPT_DIR"
     
-    # Create cleanup SQL script
-    CLEANUP_SQL="/tmp/hsm_cleanup_duplicates.sql"
-    cat > "$CLEANUP_SQL" << 'EOF'
--- HSM Duplicate Detected Events Cleanup
--- This removes duplicate "Detected" events that accumulate over time
--- It keeps one event per component and removes subsequent duplicates
-
-BEGIN;
-
--- Create temporary table to identify duplicates
-CREATE TEMPORARY TABLE dup_events AS
-SELECT 
-    component_id,
-    event_type,
-    ROW_NUMBER() OVER (PARTITION BY component_id, event_type ORDER BY timestamp DESC) as rn
-FROM events
-WHERE event_type = 'Detected'
-  AND timestamp < NOW() - INTERVAL '7 days';
-
--- Delete duplicates, keeping the most recent one
-DELETE FROM events
-WHERE id IN (
-    SELECT id FROM (
-        SELECT 
-            e.id,
-            ROW_NUMBER() OVER (PARTITION BY e.component_id, e.event_type ORDER BY e.timestamp DESC) as rn
-        FROM events e
-        WHERE e.event_type = 'Detected'
-          AND e.timestamp < NOW() - INTERVAL '7 days'
-    ) t
-    WHERE t.rn > 1
-);
-
-COMMIT;
-
--- Report the cleanup statistics
-SELECT COUNT(*) as remaining_detected_events 
-FROM events 
-WHERE event_type = 'Detected';
-EOF
-    
-    # Execute cleanup
-    print_info "Executing HSM duplicate event cleanup..."
-    if kubectl exec -n "$POSTGRES_NS" "$POSTGRES_POD" -- \
-        psql -U postgres -d hsm -f "$CLEANUP_SQL" &>> "$LOG_FILE"; then
-        print_applied "HSM duplicate detected events cleaned up"
-        rm -f "$CLEANUP_SQL"
+    # Step 1: Backup the hardware inventory history table
+    print_info "Step 1: Backing up hardware inventory history table..."
+    if [ -x "$HWINV_SCRIPT_DIR/fru_history_backup.sh" ]; then
+        if bash "$HWINV_SCRIPT_DIR/fru_history_backup.sh" &>> "$LOG_FILE"; then
+            print_applied "Hardware inventory history backup completed"
+        else
+            print_failed "Hardware inventory history backup failed"
+            return 1
+        fi
     else
-        print_failed "Failed to execute HSM duplicate event cleanup"
-        return 1
+        print_warning "fru_history_backup.sh not executable or not found"
+    fi
+    
+    # Step 2: Run the duplicate event removal script
+    print_info "Step 2: Removing duplicate detected events from database..."
+    print_warning "This may take several hours on large systems - do not interrupt"
+    
+    if [ -x "$HWINV_SCRIPT_DIR/fru_history_remove_duplicate_detected_events.sh" ]; then
+        if bash "$HWINV_SCRIPT_DIR/fru_history_remove_duplicate_detected_events.sh" &>> "$LOG_FILE"; then
+            print_applied "HSM duplicate detected events cleaned up successfully"
+            print_info "See log file for detailed cleanup statistics: $LOG_FILE"
+        else
+            print_warning "HSM duplicate event removal script completed with warnings"
+            print_info "Check logs for details: $LOG_FILE"
+            print_info "For large databases, may need to use: BATCH_SIZE=<size> MAX_BATCHES=<batches> VACUUM_TYPE=ANALYZE"
+        fi
+    else
+        print_warning "fru_history_remove_duplicate_detected_events.sh not executable or not found"
+        print_info "Execute manually using:"
+        log_message "  export HWINV_SCRIPT_DIR=\"$HWINV_SCRIPT_DIR\""
+        log_message "  \${HWINV_SCRIPT_DIR}/fru_history_backup.sh"
+        log_message "  \${HWINV_SCRIPT_DIR}/fru_history_remove_duplicate_detected_events.sh"
+        print_skipped "Manual execution required for HSM duplicate event cleanup"
     fi
 }
 
@@ -194,75 +177,15 @@ EOF
 fix_switch_admin_password() {
     print_fix "Switch Admin Password Vault Configuration"
     
-    if ! check_cray_cli; then
-        print_skipped "cray CLI not available"
-        return
-    fi
-    
-    # Check if switch credentials already exist in vault
-    if cray vault kv get secret/switch-admin &>/dev/null; then
-        print_info "Switch admin password already configured in vault"
-        print_skipped "Switch admin password already exists"
-        return
-    fi
-    
     # Prompt for switch admin password
     print_warning "Switch admin password not found in Vault"
     print_info "To configure switch admin password, please run:"
     log_message "  python3 /usr/share/doc/csm/scripts/operations/configuration/write_sw_admin_pw_to_vault.py"
-    log_message ""
-    log_message "Or manually set it using:"
-    log_message "  cray vault kv put secret/switch-admin username=<admin> password=<password>"
-    
-    print_skipped "Manual intervention required for switch credentials"
+
 }
 
 ################################################################################
-# Fix 3: CrashLoopBackOff Pods Investigation and Cleanup
-# Addresses pods stuck in CrashLoopBackOff state
-################################################################################
-
-fix_crashloop_pods() {
-    print_fix "CrashLoopBackOff Pods Investigation and Cleanup"
-    
-    if ! check_kubectl; then
-        print_skipped "kubectl not available"
-        return
-    fi
-    
-    # Find all pods with CrashLoopBackOff status
-    CRASH_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | awk '$4 == "CrashLoopBackOff" {print $1":"$2}')
-    
-    if [ -z "$CRASH_PODS" ]; then
-        print_applied "No pods in CrashLoopBackOff state found"
-        return
-    fi
-    
-    CRASH_COUNT=$(echo "$CRASH_PODS" | wc -l)
-    print_warning "Found $CRASH_COUNT pod(s) in CrashLoopBackOff state"
-    
-    # Investigate each pod
-    while IFS=':' read -r ns pod; do
-        log_message "\n  Investigating pod: $ns/$pod"
-        
-        # Get recent logs
-        LOGS=$(kubectl logs -n "$ns" "$pod" --tail=50 2>&1 | head -20)
-        log_message "  Recent logs:"
-        log_message "$LOGS"
-        
-        # Check pod events
-        EVENTS=$(kubectl describe pod -n "$ns" "$pod" 2>/dev/null | grep -A 20 "Events:")
-        log_message "  Pod events:"
-        log_message "$EVENTS"
-    done <<< "$CRASH_PODS"
-    
-    print_info "Pod investigation logged to: $LOG_FILE"
-    print_warning "Review logs and manually address pod failures before upgrade"
-    print_skipped "Manual review required for CrashLoopBackOff pods"
-}
-
-################################################################################
-# Fix 4: MetalLB LoadBalancer IP Allocation
+# Fix 3: MetalLB LoadBalancer IP Allocation
 # Reference: operations/network/metallb_bgp/
 ################################################################################
 
@@ -275,7 +198,7 @@ fix_metallb_ip_allocation() {
     fi
     
     # Find services with pending IPs
-    PENDING_SERVICES=$(kubectl get svc -A --no-headers 2>/dev/null | awk '$4 == "<pending>" {print $1":"$2}')
+    PENDING_SERVICES=$(kubectl get svc -A 2>/dev/null | awk '$4 == "<pending>" {print $1":"$2}')
     
     if [ -z "$PENDING_SERVICES" ]; then
         print_applied "All LoadBalancer services have allocated IPs"
@@ -317,7 +240,7 @@ fix_metallb_ip_allocation() {
 }
 
 ################################################################################
-# Fix 5: Kafka CRD Preparation
+# Fix 4: Kafka CRD Preparation
 # Reference: Kafka CRD handling for CSM 1.7
 ################################################################################
 
@@ -330,7 +253,7 @@ fix_kafka_crd() {
     fi
     
     # Check if Kafka CRDs exist
-    KAFKA_CRDS=$(kubectl get crd 2>/dev/null | grep -c kafka || true)
+    KAFKA_CRDS=$(kubectl get crd 2>/dev/null | grep -c kafka )
     
     if [ "$KAFKA_CRDS" -eq 0 ]; then
         print_applied "No Kafka CRDs found (expected for new installations)"
@@ -369,7 +292,7 @@ fix_kafka_crd() {
 }
 
 ################################################################################
-# Fix 6: Slingshot Fabric Backup Verification
+# Fix 5: Slingshot Fabric Backup Verification
 # Reference: Slingshot backup status check
 ################################################################################
 
@@ -413,7 +336,7 @@ fix_slingshot_backups() {
 }
 
 ################################################################################
-# Fix 7: Pod Restart Count Threshold Adjustment
+# Fix 6: Pod Restart Count Threshold Adjustment
 # Temporary workaround for excessive pod restarts
 ################################################################################
 
@@ -459,7 +382,7 @@ fix_pod_restart_issues() {
 }
 
 ################################################################################
-# Fix 8: Vault Operator CRD Preparation
+# Fix 7: Vault Operator CRD Preparation
 # Reference: cray-vault-operator_chart_upgrade_error.md
 ################################################################################
 
@@ -491,72 +414,6 @@ fix_vault_operator_crd() {
     print_info "Vault operator is deployed"
     print_info "Ensure vault-operator CRD is compatible with CSM 1.7 before upgrade"
     print_skipped "Vault operator CRD check completed"
-}
-
-################################################################################
-# Fix 9: Postgres Operator CRD Check
-# Reference: PostgreSQL Operator upgrade preparation
-################################################################################
-
-fix_postgres_operator_crd() {
-    print_fix "PostgreSQL Operator CRD Preparation"
-    
-    if ! check_kubectl; then
-        print_skipped "kubectl not available"
-        return
-    fi
-    
-    # Check PostgreSQL CRD version
-    PG_CRD=$(kubectl get crd postgresqls.postgresql.cnpg.io 2>/dev/null)
-    
-    if [ -z "$PG_CRD" ]; then
-        print_applied "PostgreSQL CRD not found or updated"
-        return
-    fi
-    
-    # Check existing PostgreSQL clusters
-    PG_CLUSTERS=$(kubectl get postgresql -A 2>/dev/null | grep -v NAME | wc -l)
-    
-    if [ "$PG_CLUSTERS" -eq 0 ]; then
-        print_applied "No PostgreSQL clusters using legacy CRD"
-        return
-    fi
-    
-    print_info "Found $PG_CLUSTERS PostgreSQL cluster(s) - may need CRD migration"
-    print_warning "Verify PostgreSQL operator version compatibility before upgrade"
-    print_skipped "PostgreSQL CRD compatibility check completed"
-}
-
-################################################################################
-# Fix 10: DNS and Network Services Verification
-# Ensure DNS and network services are operational for upgrade
-################################################################################
-
-fix_network_services() {
-    print_fix "Network Services Operational Verification"
-    
-    if ! check_kubectl; then
-        print_skipped "kubectl not available"
-        return
-    fi
-    
-    # Check CoreDNS
-    COREDNS=$(kubectl get pods -n kube-system -l k8s-app=kube-dns --no-headers 2>/dev/null | wc -l)
-    if [ "$COREDNS" -lt 2 ]; then
-        print_warning "CoreDNS running pods: $COREDNS (expected at least 2)"
-    else
-        print_info "CoreDNS is healthy ($COREDNS pods)"
-    fi
-    
-    # Check DNS resolution
-    TEST_POD=$(kubectl run -n default dns-test --image=busybox --restart=Never --rm -it -- nslookup kubernetes.default 2>/dev/null)
-    if echo "$TEST_POD" | grep -q "Address:"; then
-        print_applied "DNS resolution working correctly"
-    else
-        print_warning "DNS resolution test failed - check CoreDNS logs"
-    fi
-    
-    print_applied "Network services verification completed"
 }
 
 ################################################################################
