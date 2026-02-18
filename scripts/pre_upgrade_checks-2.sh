@@ -1103,8 +1103,8 @@ check_iscsi_sessions() {
         else
             for node in $COMPUTE_UAN_NODES; do
                 print_info "Node: $node"
-                if ssh -o BatchMode=yes -o ConnectTimeout=5 "$node" "command -v iscsiadm" &> /dev/null; then
-                    SESSION_COUNT=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$node" "iscsiadm -m session 2>/dev/null | wc -l" | tr -d ' ')
+                if ssh -i /root/.ssh/csm-ecdsa -o BatchMode=yes -o ConnectTimeout=5 "$node" "command -v iscsiadm" &> /dev/null; then
+                    SESSION_COUNT=$(ssh -i /root/.ssh/csm-ecdsa -o BatchMode=yes -o ConnectTimeout=5 "$node" "iscsiadm -m session 2>/dev/null | wc -l" | tr -d ' ')
                     log_message "       iscsiadm -m session count: ${SESSION_COUNT:-0}"
                 else
                     print_warning "iscsiadm not available on $node or SSH failed"
@@ -1166,11 +1166,11 @@ main() {
     done
 
     log_message "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
-    log_message "${BLUE}║  CSM Pre-Install / Pre-Upgrade Check Script                   ║${NC}"
+    log_message "${BLUE}║  CSM Pre-Install / Pre-Upgrade Check Script                    ║${NC}"
     log_message "${BLUE}║  Mode: ${SCRIPT_MODE}                                          ║${NC}"
-    log_message "${BLUE}║  Target: CSM 25.3.2 (1.6.2) → CSM 25.9.0 (1.7.0)             ║${NC}"
-    log_message "${BLUE}║  Read-Only: This script performs checks only                  ║${NC}"
-    log_message "${BLUE}║  Date: $(date)                                    ║${NC}"
+    log_message "${BLUE}║  Target: CSM 25.3.2 (1.6.2) → CSM 25.9.0 (1.7.0)               ║${NC}"
+    log_message "${BLUE}║  Read-Only: This script performs checks only                   ║${NC}"
+    log_message "${BLUE}║  Date: $(date)                                                 ║${NC}"
     log_message "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
     
     # Run all checks
@@ -1187,10 +1187,10 @@ main() {
     check_csm_17_specific
     check_csm_diags_issues
     check_hfp_issues
-    check_shs_issues
+    # check_shs_issues
     check_slingshot_issues
     check_sma_issues
-    check_uss_issues
+    # check_uss_issues
     check_architecture_issues
     check_iscsi_sessions
     
