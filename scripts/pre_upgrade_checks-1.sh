@@ -1,13 +1,15 @@
 #!/bin/bash
 ################################################################################
-# CSM Extended Pre-Upgrade Health Checks
+# CSM Pre-Upgrade Health Checks
 # Purpose: Run deeper read-only checks based on recommended customer commands
 ################################################################################
 
 LOG_DIR="/etc/cray/upgrade/csm/pre-checks"
 mkdir -p "$LOG_DIR"
-LOG_BASE="${LOG_DIR}/extended_$(date +%Y%m%d_%H%M%S)"
+LOG_BASE="${LOG_DIR}/checks_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOG_BASE"
+mkdir -p "$LOG_BASE/passed"
+mkdir -p "$LOG_BASE/failed_warnings"
 
 # Counters
 TOTAL_CHECKS=0
@@ -30,7 +32,7 @@ record_warn() {
 log_cmd() {
     local label="$1"
     shift
-    local out_file="$LOG_BASE/${label}.log"
+    local out_file="$LOG_BASE/failed_warnings/[FAIL]_${label}.log"
     TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
     echo "[RUN] $*" | tee -a "$out_file"
     "$@" >> "$out_file" 2>&1
@@ -42,7 +44,9 @@ log_cmd() {
             return 1
         fi
         PASSED_CHECKS=$((PASSED_CHECKS + 1))
-        echo "[PASS] $label" | tee -a "$out_file"
+        # Move to passed directory on success
+        mv "$out_file" "$LOG_BASE/passed/${label}.log"
+        echo "[PASS] $label" | tee -a "$LOG_BASE/passed/${label}.log"
     else
         FAILED_CHECKS=$((FAILED_CHECKS + 1))
         record_fail "$label"
@@ -54,7 +58,7 @@ log_cmd() {
 log_shell() {
     local label="$1"
     local cmd="$2"
-    local out_file="$LOG_BASE/${label}.log"
+    local out_file="$LOG_BASE/failed_warnings/[FAIL]_${label}.log"
     TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
     echo "[RUN] $cmd" | tee -a "$out_file"
     bash -c "set -o pipefail; $cmd" >> "$out_file" 2>&1
@@ -66,7 +70,9 @@ log_shell() {
             return 1
         fi
         PASSED_CHECKS=$((PASSED_CHECKS + 1))
-        echo "[PASS] $label" | tee -a "$out_file"
+        # Move to passed directory on success
+        mv "$out_file" "$LOG_BASE/passed/${label}.log"
+        echo "[PASS] $label" | tee -a "$LOG_BASE/passed/${label}.log"
     else
         FAILED_CHECKS=$((FAILED_CHECKS + 1))
         record_fail "$label"
@@ -76,6 +82,10 @@ log_shell() {
 }
 
 FORBIDDEN_GENERIC_REGEX='(^|[^a-z])fail(ed|ure)?([^a-z]|$)|(^|[^a-z])warn(ing)?([^a-z]|$)|(^|[^a-z])error([^a-z]|$)|(^|[^a-z])critical([^a-z]|$)|exception|traceback'
+
+strip_ansi() {
+    sed 's/\x1b\[[0-9;]*m//g'
+}
 
 validate_output() {
     local label="$1"
@@ -90,27 +100,37 @@ validate_output() {
         return 1
     fi
 
-    if [ -n "$required_regex" ] && ! grep -Eiq "$required_regex" "$out_file"; then
+    # Create a temp file with ANSI codes stripped for validation
+    local temp_clean="$out_file.clean"
+    strip_ansi < "$out_file" > "$temp_clean"
+
+    if [ -n "$required_regex" ] && ! grep -Eiq "$required_regex" "$temp_clean"; then
         echo "[FAIL] $label (missing required pattern)" | tee -a "$out_file"
         failed=1
     fi
 
-    if grep -Eiq "$FORBIDDEN_GENERIC_REGEX" "$out_file"; then
+    if grep -Eiq "$FORBIDDEN_GENERIC_REGEX" "$temp_clean"; then
         echo "[FAIL] $label (generic failure pattern detected)" | tee -a "$out_file"
         failed=1
     fi
 
-    if [ -n "$forbidden_regex" ] && grep -Eiq "$forbidden_regex" "$out_file"; then
+    if [ -n "$forbidden_regex" ] && grep -Eiq "$forbidden_regex" "$temp_clean"; then
         echo "[FAIL] $label (forbidden pattern detected)" | tee -a "$out_file"
         failed=1
     fi
 
-    if [ -n "$warn_regex" ] && grep -Eiq "$warn_regex" "$out_file"; then
+    if [ -n "$warn_regex" ] && grep -Eiq "$warn_regex" "$temp_clean"; then
         WARNING_CHECKS=$((WARNING_CHECKS + 1))
         record_warn "$label"
         echo "[WARN] $label (warning pattern detected)" | tee -a "$out_file"
+        # Rename to warning tag if it's a warning
+        if [ -f "$out_file" ]; then
+            local warn_file="${out_file/\[FAIL\]/\[WARN\]}"
+            mv "$out_file" "$warn_file"
+        fi
     fi
 
+    rm -f "$temp_clean"
     return $failed
 }
 
@@ -120,7 +140,7 @@ log_cmd_validate() {
     local forbidden_regex="$3"
     local warn_regex="$4"
     shift 4
-    local out_file="$LOG_BASE/${label}.log"
+    local out_file="$LOG_BASE/failed_warnings/[FAIL]_${label}.log"
     TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
     echo "[RUN] $*" | tee -a "$out_file"
     "$@" >> "$out_file" 2>&1
@@ -139,7 +159,9 @@ log_cmd_validate() {
     fi
 
     PASSED_CHECKS=$((PASSED_CHECKS + 1))
-    echo "[PASS] $label" | tee -a "$out_file"
+    # Move to passed directory on success
+    mv "$out_file" "$LOG_BASE/passed/${label}.log"
+    echo "[PASS] $label" | tee -a "$LOG_BASE/passed/${label}.log"
     return 0
 }
 
@@ -149,7 +171,7 @@ log_shell_validate() {
     local forbidden_regex="$3"
     local warn_regex="$4"
     local cmd="$5"
-    local out_file="$LOG_BASE/${label}.log"
+    local out_file="$LOG_BASE/failed_warnings/[FAIL]_${label}.log"
     TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
     echo "[RUN] $cmd" | tee -a "$out_file"
     bash -c "set -o pipefail; $cmd" >> "$out_file" 2>&1
@@ -168,7 +190,9 @@ log_shell_validate() {
     fi
 
     PASSED_CHECKS=$((PASSED_CHECKS + 1))
-    echo "[PASS] $label" | tee -a "$out_file"
+    # Move to passed directory on success
+    mv "$out_file" "$LOG_BASE/passed/${label}.log"
+    echo "[PASS] $label" | tee -a "$LOG_BASE/passed/${label}.log"
     return 0
 }
 
@@ -177,23 +201,29 @@ check_cmd() {
 }
 
 print_info() {
-    echo "[INFO] $1" | tee -a "$LOG_BASE/extended_checks.info.log"
+    echo "[INFO] $1" | tee -a "$LOG_BASE/checks.info.log"
 }
 
 print_warn() {
     WARNING_CHECKS=$((WARNING_CHECKS + 1))
-    echo "[WARN] $1" | tee -a "$LOG_BASE/extended_checks.info.log"
+    echo "[WARN] $1" | tee -a "$LOG_BASE/checks.info.log"
 }
 
 print_summary() {
-    local summary_file="$LOG_BASE/extended_checks.summary.log"
+    local summary_file="$LOG_BASE/checks.summary.log"
     {
-        echo "Extended pre-upgrade checks summary"
+        echo "Pre-upgrade checks summary"
         echo "Total:   $TOTAL_CHECKS"
         echo "Passed:  $PASSED_CHECKS"
         echo "Failed:  $FAILED_CHECKS"
         echo "Warnings:$WARNING_CHECKS"
         echo "Logs:    $LOG_BASE"
+        echo ""
+        echo "IMPORTANT: Please review the failed/warning checks!"
+        echo "Location: $LOG_BASE/failed_warnings/"
+        echo "Files are tagged with [FAIL] or [WARN] prefix."
+        echo "Please verify that these checks actually failed and are not false positives."
+        echo ""
         if [ ${#FAILED_LABELS[@]} -gt 0 ]; then
             echo "Failed checks:"
             printf '  - %s\n' "${FAILED_LABELS[@]}"
@@ -205,7 +235,7 @@ print_summary() {
     } | tee -a "$summary_file"
 }
 
-print_info "Extended pre-upgrade checks started at $(date)"
+print_info "Pre-upgrade checks started at $(date)"
 
 # HMS discovery verification scripts
 if [ -x /opt/cray/csm/scripts/hms_verification/hsm_discovery_status_test.sh ]; then
@@ -459,7 +489,7 @@ fi
 # Spire entry counts
 if check_cmd kubectl; then
     log_shell "spire_entry_count" "kubectl exec -i -n spire cray-spire-server-0 -c spire-server -- /opt/spire/bin/spire-server entry count"
-    log_shell "spire_entry_count_list" "kubectl exec -i -n spire spire-server-0 -c spire-server -- /opt/spire/bin/spire-server entry show | grep 'Entry ID' | wc -l"
+    log_shell "spire_entry_count_list" "kubectl exec -i -n spire cray-spire-server-0 -c spire-server -- /opt/spire/bin/spire-server entry show | grep 'Entry ID' | wc -l"
 fi
 
 # NCN health checks
@@ -498,7 +528,7 @@ if check_cmd kubectl; then
     log_cmd "kubectl_get_pods_wide" kubectl get pods -o wide -A
 fi
 
-print_info "Extended pre-upgrade checks completed at $(date)"
+print_info "Pre-upgrade checks completed at $(date)"
 print_summary
 print_info "Logs saved under: $LOG_BASE"
 
