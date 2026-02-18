@@ -1,12 +1,12 @@
 #!/bin/bash
 ################################################################################
-# CSM Extended Pre-Upgrade Health Checks
+# CSM Pre-Upgrade Health Checks
 # Purpose: Run deeper read-only checks based on recommended customer commands
 ################################################################################
 
 LOG_DIR="/etc/cray/upgrade/csm/pre-checks"
 mkdir -p "$LOG_DIR"
-LOG_BASE="${LOG_DIR}/extended_$(date +%Y%m%d_%H%M%S)"
+LOG_BASE="${LOG_DIR}/checks_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOG_BASE"
 mkdir -p "$LOG_BASE/passed"
 mkdir -p "$LOG_BASE/failed"
@@ -201,18 +201,18 @@ check_cmd() {
 }
 
 print_info() {
-    echo "[INFO] $1" | tee -a "$LOG_BASE/extended_checks.info.log"
+    echo "[INFO] $1" | tee -a "$LOG_BASE/checks.info.log"
 }
 
 print_warn() {
     WARNING_CHECKS=$((WARNING_CHECKS + 1))
-    echo "[WARN] $1" | tee -a "$LOG_BASE/extended_checks.info.log"
+    echo "[WARN] $1" | tee -a "$LOG_BASE/checks.info.log"
 }
 
 print_summary() {
-    local summary_file="$LOG_BASE/extended_checks.summary.log"
+    local summary_file="$LOG_BASE/checks.summary.log"
     {
-        echo "Extended pre-upgrade checks summary"
+        echo "Pre-upgrade checks summary"
         echo "Total:   $TOTAL_CHECKS"
         echo "Passed:  $PASSED_CHECKS"
         echo "Failed:  $FAILED_CHECKS"
@@ -229,7 +229,7 @@ print_summary() {
     } | tee -a "$summary_file"
 }
 
-print_info "Extended pre-upgrade checks started at $(date)"
+print_info "Pre-upgrade checks started at $(date)"
 
 # HMS discovery verification scripts
 if [ -x /opt/cray/csm/scripts/hms_verification/hsm_discovery_status_test.sh ]; then
@@ -522,7 +522,7 @@ if check_cmd kubectl; then
     log_cmd "kubectl_get_pods_wide" kubectl get pods -o wide -A
 fi
 
-print_info "Extended pre-upgrade checks completed at $(date)"
+print_info "Pre-upgrade checks completed at $(date)"
 print_summary
 print_info "Logs saved under: $LOG_BASE"
 
