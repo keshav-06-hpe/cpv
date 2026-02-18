@@ -1103,8 +1103,8 @@ check_iscsi_sessions() {
         else
             for node in $COMPUTE_UAN_NODES; do
                 print_info "Node: $node"
-                if ssh -o BatchMode=yes -o ConnectTimeout=5 "$node" "command -v iscsiadm" &> /dev/null; then
-                    SESSION_COUNT=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$node" "iscsiadm -m session 2>/dev/null | wc -l" | tr -d ' ')
+                if ssh -i /root/.ssh/csm-ecdsa -o BatchMode=yes -o ConnectTimeout=5 "$node" "command -v iscsiadm" &> /dev/null; then
+                    SESSION_COUNT=$(ssh -i /root/.ssh/csm-ecdsa -o BatchMode=yes -o ConnectTimeout=5 "$node" "iscsiadm -m session 2>/dev/null | wc -l" | tr -d ' ')
                     log_message "       iscsiadm -m session count: ${SESSION_COUNT:-0}"
                 else
                     print_warning "iscsiadm not available on $node or SSH failed"
