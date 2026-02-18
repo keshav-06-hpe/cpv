@@ -9,8 +9,7 @@ mkdir -p "$LOG_DIR"
 LOG_BASE="${LOG_DIR}/checks_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOG_BASE"
 mkdir -p "$LOG_BASE/passed"
-mkdir -p "$LOG_BASE/failed"
-mkdir -p "$LOG_BASE/warnings"
+mkdir -p "$LOG_BASE/failed_warnings"
 
 # Counters
 TOTAL_CHECKS=0
@@ -33,7 +32,7 @@ record_warn() {
 log_cmd() {
     local label="$1"
     shift
-    local out_file="$LOG_BASE/failed/${label}.log"
+    local out_file="$LOG_BASE/failed_warnings/[FAIL]_${label}.log"
     TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
     echo "[RUN] $*" | tee -a "$out_file"
     "$@" >> "$out_file" 2>&1
@@ -59,7 +58,7 @@ log_cmd() {
 log_shell() {
     local label="$1"
     local cmd="$2"
-    local out_file="$LOG_BASE/failed/${label}.log"
+    local out_file="$LOG_BASE/failed_warnings/[FAIL]_${label}.log"
     TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
     echo "[RUN] $cmd" | tee -a "$out_file"
     bash -c "set -o pipefail; $cmd" >> "$out_file" 2>&1
@@ -124,9 +123,10 @@ validate_output() {
         WARNING_CHECKS=$((WARNING_CHECKS + 1))
         record_warn "$label"
         echo "[WARN] $label (warning pattern detected)" | tee -a "$out_file"
-        # Move to warnings directory if it's a warning
+        # Rename to warning tag if it's a warning
         if [ -f "$out_file" ]; then
-            mv "$out_file" "$LOG_BASE/warnings/${label}.log"
+            local warn_file="${out_file/\[FAIL\]/\[WARN\]}"
+            mv "$out_file" "$warn_file"
         fi
     fi
 
@@ -140,7 +140,7 @@ log_cmd_validate() {
     local forbidden_regex="$3"
     local warn_regex="$4"
     shift 4
-    local out_file="$LOG_BASE/failed/${label}.log"
+    local out_file="$LOG_BASE/failed_warnings/[FAIL]_${label}.log"
     TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
     echo "[RUN] $*" | tee -a "$out_file"
     "$@" >> "$out_file" 2>&1
@@ -171,7 +171,7 @@ log_shell_validate() {
     local forbidden_regex="$3"
     local warn_regex="$4"
     local cmd="$5"
-    local out_file="$LOG_BASE/failed/${label}.log"
+    local out_file="$LOG_BASE/failed_warnings/[FAIL]_${label}.log"
     TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
     echo "[RUN] $cmd" | tee -a "$out_file"
     bash -c "set -o pipefail; $cmd" >> "$out_file" 2>&1
@@ -218,6 +218,12 @@ print_summary() {
         echo "Failed:  $FAILED_CHECKS"
         echo "Warnings:$WARNING_CHECKS"
         echo "Logs:    $LOG_BASE"
+        echo ""
+        echo "IMPORTANT: Please review the failed/warning checks!"
+        echo "Location: $LOG_BASE/failed_warnings/"
+        echo "Files are tagged with [FAIL] or [WARN] prefix."
+        echo "Please verify that these checks actually failed and are not false positives."
+        echo ""
         if [ ${#FAILED_LABELS[@]} -gt 0 ]; then
             echo "Failed checks:"
             printf '  - %s\n' "${FAILED_LABELS[@]}"
