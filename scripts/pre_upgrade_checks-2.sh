@@ -20,11 +20,31 @@ TOTAL_CHECKS=0
 PASSED_CHECKS=0
 FAILED_CHECKS=0
 WARNING_CHECKS=0
+INFO_CHECKS=0
 
 # Log file
 LOG_DIR="/etc/cray/upgrade/csm/pre-checks"
 mkdir -p "$LOG_DIR"
-LOG_FILE="${LOG_DIR}/pre_upgrade_checks_$(date +%Y%m%d_%H%M%S).log"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOG_FILE="${LOG_DIR}/pre_upgrade_checks_${TIMESTAMP}.log"
+
+# Note: Individual check logs are organized in PASS/FAIL/WARNING subdirectories
+# No separate consolidated status log files needed
+
+# Arrays to store check details
+declare -a PASS_CHECKS
+declare -a FAIL_CHECKS
+declare -a WARN_CHECKS
+declare -a INFO_CHECKS_ARRAY
+
+# Current check tracking
+CURRENT_CHECK_NUM=0
+CURRENT_CHECK_NAME=""
+CURRENT_CHECK_LOG_FILE=""
+
+# Directory for individual check logs
+CHECKS_DIR="${LOG_DIR}/checks_${TIMESTAMP}"
+mkdir -p "$CHECKS_DIR"
 
 # Mode (pre-install or pre-upgrade)
 SCRIPT_MODE="pre-upgrade"
@@ -35,6 +55,19 @@ SCRIPT_MODE="pre-upgrade"
 
 log_message() {
     echo -e "$1" | tee -a "$LOG_FILE"
+    
+    # Also append to individual check log file if it exists
+    if [ -n "$CURRENT_CHECK_LOG_FILE" ] && [ -f "$CURRENT_CHECK_LOG_FILE" ]; then
+        echo -e "$1" | sed 's/\x1b\[[0-9;]*m//g' >> "$CURRENT_CHECK_LOG_FILE"
+    fi
+}
+
+log_command_output() {
+    # This function captures command output and logs it to both main and individual check logs
+    # Usage: some_command | log_command_output
+    while IFS= read -r line; do
+        echo "$line" | tee -a "$LOG_FILE" >> "$CURRENT_CHECK_LOG_FILE"
+    done
 }
 
 print_header() {
@@ -45,26 +78,168 @@ print_header() {
 
 print_check() {
     TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+    CURRENT_CHECK_NUM=$TOTAL_CHECKS
+    CURRENT_CHECK_NAME="$1"
+    
+    # Create individual check log file with sanitized name
+    local sanitized_name=$(echo "$1" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-50)
+    CURRENT_CHECK_LOG_FILE="${CHECKS_DIR}/CHECK_${TOTAL_CHECKS}_${sanitized_name}.log"
+    
+    # Initialize check log file with detailed header
+    {
+        echo "================================================================================"
+        echo "CHECK #${TOTAL_CHECKS}: $1"
+        echo "================================================================================"
+        echo "Started: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "Timestamp: $(date +%s)"
+        echo "Script Mode: $SCRIPT_MODE"
+        echo ""
+        echo "Details:"
+        echo "─────────────────────────────────────────────────────────────────────────────"
+        echo ""
+    } > "$CURRENT_CHECK_LOG_FILE"
+    
     log_message "\n[CHECK $TOTAL_CHECKS] $1"
 }
 
 print_pass() {
     PASSED_CHECKS=$((PASSED_CHECKS + 1))
     log_message "${GREEN}✓ PASS${NC}: $1"
+    
+    # Store in pass array
+    PASS_CHECKS+=(\"[CHECK $CURRENT_CHECK_NUM] $CURRENT_CHECK_NAME: $1\")
+    
+    # Create PASS subdirectory and organize check log
+    local pass_dir="${CHECKS_DIR}/PASS"
+    mkdir -p "$pass_dir"
+    local sanitized_name=$(echo "$CURRENT_CHECK_NAME" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-50)
+    local final_log_file="${pass_dir}/CHECK_${CURRENT_CHECK_NUM}_${sanitized_name}.log"
+    
+    # Move the check log from root to PASS subdirectory and append final status
+    if [ -f "$CURRENT_CHECK_LOG_FILE" ]; then
+        mv "$CURRENT_CHECK_LOG_FILE" "$final_log_file"
+    else
+        # If no check log exists, create it
+        touch "$final_log_file"
+    fi
+    
+    # Append final status to the check log
+    {
+        echo ""
+        echo "─────────────────────────────────────────────────────────────────────────────"
+        echo "Result Summary:"
+        echo "  Status: PASS"
+        echo "  Message: $1"
+        echo "  Completed: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "  Timestamp: $(date +%s)"
+        echo ""
+        echo "================================================================================"
+    } >> "$final_log_file"
 }
 
 print_fail() {
     FAILED_CHECKS=$((FAILED_CHECKS + 1))
     log_message "${RED}✗ FAIL${NC}: $1"
+    
+    # Store in fail array
+    FAIL_CHECKS+=(\"[CHECK $CURRENT_CHECK_NUM] $CURRENT_CHECK_NAME: $1\")
+    
+    # Create FAIL subdirectory and organize check log
+    local fail_dir="${CHECKS_DIR}/FAIL"
+    mkdir -p "$fail_dir"
+    local sanitized_name=$(echo "$CURRENT_CHECK_NAME" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-50)
+    local final_log_file="${fail_dir}/CHECK_${CURRENT_CHECK_NUM}_${sanitized_name}.log"
+    
+    # Move the check log from root to FAIL subdirectory and append final status
+    if [ -f "$CURRENT_CHECK_LOG_FILE" ]; then
+        mv "$CURRENT_CHECK_LOG_FILE" "$final_log_file"
+    else
+        # If no check log exists, create it
+        touch "$final_log_file"
+    fi
+    
+    # Append final status to the check log
+    {
+        echo ""
+        echo "─────────────────────────────────────────────────────────────────────────────"
+        echo "Result Summary:"
+        echo "  Status: FAIL"
+        echo "  Message: $1"
+        echo "  Completed: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "  Timestamp: $(date +%s)"
+        echo ""
+        echo "================================================================================"
+    } >> "$final_log_file"
 }
 
 print_warning() {
     WARNING_CHECKS=$((WARNING_CHECKS + 1))
     log_message "${YELLOW}⚠ WARNING${NC}: $1"
+    
+    # Store in warning array
+    WARN_CHECKS+=(\"[CHECK $CURRENT_CHECK_NUM] $CURRENT_CHECK_NAME: $1\")
+    
+    # Create WARNING subdirectory and organize check log
+    local warn_dir="${CHECKS_DIR}/WARNING"
+    mkdir -p "$warn_dir"
+    local sanitized_name=$(echo "$CURRENT_CHECK_NAME" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-50)
+    local final_log_file="${warn_dir}/CHECK_${CURRENT_CHECK_NUM}_${sanitized_name}.log"
+    
+    # Move the check log from root to WARNING subdirectory and append final status
+    if [ -f "$CURRENT_CHECK_LOG_FILE" ]; then
+        mv "$CURRENT_CHECK_LOG_FILE" "$final_log_file"
+    else
+        # If no check log exists, create it
+        touch "$final_log_file"
+    fi
+    
+    # Append final status to the check log
+    {
+        echo ""
+        echo "─────────────────────────────────────────────────────────────────────────────"
+        echo "Result Summary:"
+        echo "  Status: WARNING"
+        echo "  Message: $1"
+        echo "  Completed: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "  Timestamp: $(date +%s)"
+        echo ""
+        echo "================================================================================"
+    } >> "$final_log_file"
 }
 
 print_info() {
+    INFO_CHECKS=$((INFO_CHECKS + 1))
     log_message "${BLUE}ℹ INFO${NC}: $1"
+    
+    # Store in info array
+    INFO_CHECKS_ARRAY+=(\"[CHECK $CURRENT_CHECK_NUM] $CURRENT_CHECK_NAME: $1\")
+    
+    # Create INFO subdirectory and organize check log
+    local info_dir="${CHECKS_DIR}/INFO"
+    mkdir -p "$info_dir"
+    local sanitized_name=$(echo "$CURRENT_CHECK_NAME" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-50)
+    local final_log_file="${info_dir}/CHECK_${CURRENT_CHECK_NUM}_${sanitized_name}.log"
+    
+    # Move the check log from root to INFO subdirectory and append final status
+    if [ -f "$CURRENT_CHECK_LOG_FILE" ]; then
+        mv "$CURRENT_CHECK_LOG_FILE" "$final_log_file"
+    else
+        # If no check log exists, create it
+        touch "$final_log_file"
+    fi
+    
+    # Append final status to the check log
+    {
+        echo ""
+        echo "─────────────────────────────────────────────────────────────────────────────"
+        echo "Result Summary:"
+        echo "  Status: INFO"
+        echo "  Message: $1"
+        echo "  Completed: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "  Timestamp: $(date +%s)"
+        echo ""
+        echo "================================================================================"
+    } >> "$final_log_file"
 }
 
 print_usage() {
@@ -153,10 +328,13 @@ check_kubernetes_health() {
         NOT_READY=$(kubectl get nodes 2>/dev/null | grep -v Ready | grep -v NAME | wc -l)
         if [ "$NOT_READY" -gt 0 ]; then
             print_fail "$NOT_READY nodes not in Ready state"
-            kubectl get nodes | grep -v Ready | grep -v NAME | tee -a "$LOG_FILE"
+            log_message "       Detailed node status:"
+            kubectl get nodes 2>/dev/null | log_command_output
             log_message "       Reference: operations/validate_csm_health/"
         else
             print_pass "All Kubernetes nodes Ready"
+            log_message "       Node details:"
+            kubectl get nodes 2>/dev/null | log_command_output
         fi
     else
         print_warning "kubectl not available"
@@ -166,14 +344,22 @@ check_kubernetes_health() {
     print_check "Checking critical system pods"
     if command -v kubectl &> /dev/null; then
         CRITICAL_NAMESPACES="kube-system services nexus vault"
+        FAILED_PODS_TOTAL=0
         for ns in $CRITICAL_NAMESPACES; do
             FAILED_PODS=$(kubectl get pods -n $ns 2>/dev/null | grep -v Running | grep -v Completed | grep -v NAME | wc -l)
             if [ "$FAILED_PODS" -gt 0 ]; then
-                print_warning "Found $FAILED_PODS non-running pods in namespace $ns"
-                kubectl get pods -n $ns | grep -v Running | grep -v Completed | grep -v NAME | tee -a "$LOG_FILE"
+                log_message "       Found $FAILED_PODS non-running pods in namespace $ns"
+                log_message "       Detailed pod status for namespace $ns:"
+                kubectl get pods -n $ns 2>/dev/null | grep -v Running | grep -v Completed | log_command_output
+                FAILED_PODS_TOTAL=$((FAILED_PODS_TOTAL + FAILED_PODS))
             fi
         done
-        print_pass "Critical namespace pod check completed"
+        
+        if [ "$FAILED_PODS_TOTAL" -gt 0 ]; then
+            print_warning "Found $FAILED_PODS_TOTAL non-running pods in critical namespaces"
+        else
+            print_pass "All critical namespace pods are running"
+        fi
     fi
 
     # Check 3: Pods with high restart counts
@@ -182,7 +368,8 @@ check_kubernetes_health() {
         HIGH_RESTARTS=$(kubectl get pods -A 2>/dev/null | awk '{if ($5 > 10) print $0}' | grep -v RESTARTS | wc -l)
         if [ "$HIGH_RESTARTS" -gt 0 ]; then
             print_warning "Found $HIGH_RESTARTS pods with >10 restarts"
-            kubectl get pods -A | awk '{if ($5 > 10) print $0}' | grep -v RESTARTS | head -10 | tee -a "$LOG_FILE"
+            log_message "       Pods with high restart counts (showing first 10):"
+            kubectl get pods -A 2>/dev/null | awk '{if ($5 > 10) print $0}' | head -10 | log_command_output
             log_message "       Review logs for these pods before upgrade"
         else
             print_pass "No pods with excessive restarts"
@@ -195,7 +382,8 @@ check_kubernetes_health() {
         PENDING_PVC=$(kubectl get pvc -A 2>/dev/null | grep -v Bound | grep -v STATUS | wc -l)
         if [ "$PENDING_PVC" -gt 0 ]; then
             print_fail "Found $PENDING_PVC PVCs not in Bound state"
-            kubectl get pvc -A | grep -v Bound | grep -v STATUS | tee -a "$LOG_FILE"
+            log_message "       Detailed PVC status:"
+            kubectl get pvc -A 2>/dev/null | grep -v Bound | log_command_output
         else
             print_pass "All PVCs in Bound state"
         fi
@@ -217,15 +405,19 @@ check_ceph_health() {
         case "$CEPH_STATUS" in
             "HEALTH_OK")
                 print_pass "Ceph cluster health: OK"
+                log_message "       Ceph health details:"
+                ceph health detail 2>/dev/null | log_command_output
                 ;;
             "HEALTH_WARN")
                 print_warning "Ceph cluster health: WARNING"
-                ceph health detail | tee -a "$LOG_FILE"
+                log_message "       Ceph health details:"
+                ceph health detail 2>/dev/null | log_command_output
                 log_message "       Reference: operations/utility_storage/"
                 ;;
             "HEALTH_ERR"|*)
                 print_fail "Ceph cluster health: ERROR or UNKNOWN ($CEPH_STATUS)"
-                ceph health detail | tee -a "$LOG_FILE"
+                log_message "       Ceph health details:"
+                ceph health detail 2>/dev/null | log_command_output
                 log_message "       Resolve Ceph issues before upgrade"
                 ;;
         esac
@@ -240,21 +432,23 @@ check_ceph_health() {
         DOWN_OSDS=$(echo "$OSD_STAT" | grep -oP '\d+ down' | awk '{print $1}')
         if [ -n "$DOWN_OSDS" ] && [ "$DOWN_OSDS" -gt 0 ]; then
             print_fail "$DOWN_OSDS OSDs are down"
-            ceph osd tree | tee -a "$LOG_FILE"
+            log_message "       Ceph OSD tree:"
+            ceph osd tree 2>/dev/null | log_command_output
         else
             print_pass "All OSDs are up"
+            log_message "       OSD status: $OSD_STAT"
         fi
     fi
 
     # Check 3: Ceph usage
     print_check "Checking Ceph storage usage"
     if command -v ceph &> /dev/null; then
-        CEPH_USAGE=$(ceph df 2>/dev/null | grep TOTAL | awk '{print $5}' | sed 's/%//')
+        CEPH_USAGE=$(ceph df 2>/dev/null | grep TOTAL | awk '{print $10}' | sed 's/%//')
         if [ -n "$CEPH_USAGE" ]; then
-            if [ "$CEPH_USAGE" -gt 80 ]; then
+            if [ "${CEPH_USAGE%.*}" -gt 80 ]; then
                 print_fail "Ceph storage usage at ${CEPH_USAGE}% (>80%)"
                 log_message "       Free up space before upgrade"
-            elif [ "$CEPH_USAGE" -gt 70 ]; then
+            elif [ "${CEPH_USAGE%.*}" -gt 70 ]; then
                 print_warning "Ceph storage usage at ${CEPH_USAGE}% (approaching threshold)"
             else
                 print_pass "Ceph storage usage at ${CEPH_USAGE}% (acceptable)"
@@ -330,6 +524,7 @@ check_postgres_health() {
     print_check "Checking PostgreSQL cluster status"
     if command -v kubectl &> /dev/null; then
         PG_CLUSTERS=$(kubectl get postgresql -A 2>/dev/null | grep -v NAME | awk '{print $1":"$2}')
+        PG_ISSUES=0
 
         if [ -z "$PG_CLUSTERS" ]; then
             print_info "No PostgreSQL clusters found (or CRD not installed)"
@@ -342,11 +537,18 @@ check_postgres_health() {
                 TOTAL=$(kubectl get postgresql -n $ns $name -o jsonpath='{.spec.numberOfInstances}' 2>/dev/null)
 
                 if [ "$RUNNING" != "$TOTAL" ] && [ -n "$TOTAL" ]; then
-                    print_warning "PostgreSQL $ns/$name: $RUNNING/$TOTAL instances running"
+                    log_message "       WARNING: PostgreSQL $ns/$name: $RUNNING/$TOTAL instances running"
+                    PG_ISSUES=$((PG_ISSUES + 1))
                 else
-                    print_pass "PostgreSQL $ns/$name: All instances running"
+                    log_message "       OK: PostgreSQL $ns/$name: All instances running"
                 fi
             done
+            
+            if [ "$PG_ISSUES" -eq 0 ]; then
+                print_pass "All PostgreSQL clusters have desired instances running"
+            else
+                print_warning "Found $PG_ISSUES PostgreSQL cluster(s) with instance issues"
+            fi
         fi
     fi
 
@@ -381,14 +583,14 @@ check_postgres_health() {
                 if [ -n "$PATRONI_OUTPUT" ]; then
                     # Check for unhealthy states in patronictl output
                     if echo "$PATRONI_OUTPUT" | grep -iq "failed\|stopped\|unknown"; then
-                        print_warning "Patroni cluster ${POSTGRESQL} (${NAMESPACE}) has unhealthy members"
-                        echo "$PATRONI_OUTPUT" | tee -a "$LOG_FILE"
+                        log_message "       WARNING: Patroni cluster ${POSTGRESQL} (${NAMESPACE}) has unhealthy members"
+                        echo "$PATRONI_OUTPUT" | log_command_output
                         PATRONI_ISSUES=$((PATRONI_ISSUES + 1))
                     else
-                        print_pass "Patroni cluster ${POSTGRESQL} (${NAMESPACE}) healthy"
+                        log_message "       OK: Patroni cluster ${POSTGRESQL} (${NAMESPACE}) healthy"
                     fi
                 else
-                    print_warning "Could not retrieve Patroni status for ${POSTGRESQL} (${NAMESPACE})"
+                    log_message "       WARNING: Could not retrieve Patroni status for ${POSTGRESQL} (${NAMESPACE})"
                     PATRONI_ISSUES=$((PATRONI_ISSUES + 1))
                 fi
             fi
@@ -397,6 +599,7 @@ check_postgres_health() {
         if [ "$PATRONI_ISSUES" -eq 0 ]; then
             print_pass "All Patroni clusters healthy"
         else
+            print_warning "Found $PATRONI_ISSUES Patroni cluster(s) with issues"
             log_message "       Reference: troubleshooting/known_issues/postgres_*.md"
         fi
     fi
@@ -522,41 +725,41 @@ check_hms_services() {
                   "hbtd:cray-hbtd" "hmnfd:cray-hmnfd" "hsm:cray-smd" \
                   "pcs:cray-power-control" "scsd:cray-scsd" "sls:cray-sls")
     
+    print_check "Checking HMS services health"
+
     FAILED_SERVICES=""
     WARNING_SERVICES=""
 
-    for svc_pair in "${HMS_SERVICES[@]}"; do
-        SVC_NAME=$(echo $svc_pair | cut -d: -f1)
-        DEPLOYMENT=$(echo $svc_pair | cut -d: -f2)
+    if command -v kubectl &> /dev/null; then
+        for svc_pair in "${HMS_SERVICES[@]}"; do
+            SVC_NAME=$(echo $svc_pair | cut -d: -f1)
+            DEPLOYMENT=$(echo $svc_pair | cut -d: -f2)
 
-        print_check "Checking HMS service: $SVC_NAME ($DEPLOYMENT)"
-
-        if command -v kubectl &> /dev/null; then
             # Check if deployment exists
             if kubectl get deployment -n services $DEPLOYMENT &> /dev/null; then
                 REPLICAS=$(kubectl get deployment -n services $DEPLOYMENT -o jsonpath='{.status.availableReplicas}' 2>/dev/null)
                 DESIRED=$(kubectl get deployment -n services $DEPLOYMENT -o jsonpath='{.spec.replicas}' 2>/dev/null)
 
                 if [ "$REPLICAS" != "$DESIRED" ] || [ -z "$REPLICAS" ]; then
-                    print_warning "$SVC_NAME: $REPLICAS/$DESIRED replicas available"
+                    log_message "       WARNING: $SVC_NAME: $REPLICAS/$DESIRED replicas available"
                     WARNING_SERVICES="$WARNING_SERVICES $SVC_NAME"
                 else
-                    print_pass "$SVC_NAME: All replicas running ($REPLICAS/$DESIRED)"
+                    log_message "       OK: $SVC_NAME: All replicas running ($REPLICAS/$DESIRED)"
                 fi
 
                 # Check pod status
                 FAILED_PODS=$(kubectl get pods -n services -l app.kubernetes.io/name=$DEPLOYMENT 2>/dev/null | grep -v Running | grep -v Completed | grep -v NAME | wc -l)
                 if [ "$FAILED_PODS" -gt 0 ]; then
-                    print_warning "$SVC_NAME has $FAILED_PODS non-running pods"
+                    log_message "       WARNING: $SVC_NAME has $FAILED_PODS non-running pods"
                     WARNING_SERVICES="$WARNING_SERVICES $SVC_NAME"
                 fi
             else
-                print_info "$SVC_NAME deployment not found (may not be installed)"
+                log_message "       INFO: $SVC_NAME deployment not found (may not be installed)"
             fi
-        fi
-    done
+        done
+    fi
 
-    # Summary of HMS service checks
+    # Single status call for the entire check
     if [ -n "$FAILED_SERVICES" ]; then
         print_fail "Failed HMS services:$FAILED_SERVICES"
         log_message "       Reference: scripts/hms_verification/run_hms_ct_tests.sh"
@@ -701,10 +904,10 @@ check_csm_17_specific() {
             ETCD_COUNT=$(kubectl get pods -n services 2>/dev/null | grep "${SERVICE}-bitnami-etcd-" | grep -v snapshotter | grep Running | wc -l)
             if [ "$ETCD_COUNT" -lt 3 ]; then
                 if [ "$ETCD_COUNT" -eq 0 ]; then
-                    print_info "${SERVICE} etcd cluster not found (service may not be installed)"
+                    log_message "       INFO: ${SERVICE} etcd cluster not found (service may not be installed)"
                 else
-                    print_warning "${SERVICE} etcd cluster has only ${ETCD_COUNT}/3 pods running"
-                    kubectl get pods -n services | grep "${SERVICE}-bitnami-etcd-" | grep -v snapshotter | tee -a "$LOG_FILE"
+                    log_message "       WARNING: ${SERVICE} etcd cluster has only ${ETCD_COUNT}/3 pods running"
+                    kubectl get pods -n services 2>/dev/null | grep "${SERVICE}-bitnami-etcd-" | grep -v snapshotter | log_command_output
                     ETCD_ISSUES=$((ETCD_ISSUES + 1))
                 fi
             fi
@@ -713,6 +916,7 @@ check_csm_17_specific() {
         if [ "$ETCD_ISSUES" -eq 0 ]; then
             print_pass "All HMS service etcd clusters healthy"
         else
+            print_warning "Found $ETCD_ISSUES HMS service etcd clusters with issues"
             log_message "       Reference: operations/validate_csm_health/"
         fi
     fi
@@ -1075,7 +1279,7 @@ check_iscsi_sessions() {
     if command -v kubectl &> /dev/null; then
         WORKER_NODES=$(kubectl get nodes -l iscsi=sbps -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}' 2>/dev/null)
         if [ -z "$WORKER_NODES" ]; then
-            print_info "No worker nodes found with label iscsi=sbps"
+            print_pass "No worker nodes found with label iscsi=sbps"
             log_message "       Run: kubectl get nodes -l iscsi=sbps"
         else
             NODE_COUNT=$(echo "$WORKER_NODES" | wc -w | tr -d ' ')
@@ -1118,7 +1322,7 @@ check_iscsi_sessions() {
 }
 
 ################################################################################
-# Summary Report
+# Summary Report and Status-Based Log Organization
 ################################################################################
 
 print_summary() {
@@ -1126,10 +1330,23 @@ print_summary() {
     
     log_message "\nTotal Checks: $TOTAL_CHECKS"
     log_message "${GREEN}Passed: $PASSED_CHECKS${NC}"
+    log_message "${BLUE}Info: $INFO_CHECKS${NC}"
     log_message "${YELLOW}Warnings: $WARNING_CHECKS${NC}"
     log_message "${RED}Failed: $FAILED_CHECKS${NC}"
     
-    log_message "\n${BLUE}Log file: $LOG_FILE${NC}"
+    log_message "\n${BLUE}Log files:${NC}"
+    log_message "  Main log: $LOG_FILE"
+    log_message "  Individual check logs: $CHECKS_DIR/"
+    log_message "    ├── PASS/"
+    log_message "    ├── FAIL/"
+    log_message "    ├── INFO/"
+    log_message "    └── WARNING/"
+    
+    # Create consolidated status-organized log
+    organize_logs_by_status
+    
+    # Create index of individual check logs
+    create_check_index
     
     if [ "$FAILED_CHECKS" -gt 0 ]; then
         log_message "\n${RED}⚠ CRITICAL: $FAILED_CHECKS checks failed. Address these issues before proceeding with upgrade.${NC}"
@@ -1141,6 +1358,169 @@ print_summary() {
         log_message "\n${GREEN}✓ All checks passed. System appears ready for upgrade.${NC}"
         return 0
     fi
+}
+
+organize_logs_by_status() {
+    local organized_log="${LOG_DIR}/pre_upgrade_checks_${TIMESTAMP}_BY_STATUS.log"
+    
+    {
+        echo "================================================================================"
+        echo "CSM PRE-UPGRADE CHECK REPORT - ORGANIZED BY STATUS"
+        echo "================================================================================"
+        echo "Generated: $(date)"
+        echo "Mode: $SCRIPT_MODE"
+        echo ""
+        echo "SUMMARY:"
+        echo "  Total Checks: $TOTAL_CHECKS"
+        echo "  Passed: $PASSED_CHECKS"
+        echo "  Info: $INFO_CHECKS"
+        echo "  Warnings: $WARNING_CHECKS"
+        echo "  Failed: $FAILED_CHECKS"
+        echo ""
+        echo "================================================================================"
+        echo ""
+        
+        if [ "$PASSED_CHECKS" -gt 0 ]; then
+            echo "✓ PASSED CHECKS ($PASSED_CHECKS)"
+            echo "================================================================================"
+            if [ -d "${CHECKS_DIR}/PASS" ]; then
+                cat "${CHECKS_DIR}"/PASS/CHECK_*.log 2>/dev/null
+            fi
+            echo ""
+        fi
+        
+        if [ "$INFO_CHECKS" -gt 0 ]; then
+            echo "ℹ INFO CHECKS ($INFO_CHECKS)"
+            echo "================================================================================"
+            if [ -d "${CHECKS_DIR}/INFO" ]; then
+                cat "${CHECKS_DIR}"/INFO/CHECK_*.log 2>/dev/null
+            fi
+            echo ""
+        fi
+        
+        if [ "$WARNING_CHECKS" -gt 0 ]; then
+            echo "⚠ WARNING CHECKS ($WARNING_CHECKS)"
+            echo "================================================================================"
+            if [ -d "${CHECKS_DIR}/WARNING" ]; then
+                cat "${CHECKS_DIR}"/WARNING/CHECK_*.log 2>/dev/null
+            fi
+            echo ""
+        fi
+        
+        if [ "$FAILED_CHECKS" -gt 0 ]; then
+            echo "✗ FAILED CHECKS ($FAILED_CHECKS)"
+            echo "================================================================================"
+            if [ -d "${CHECKS_DIR}/FAIL" ]; then
+                cat "${CHECKS_DIR}"/FAIL/CHECK_*.log 2>/dev/null
+            fi
+            echo ""
+        fi
+        
+        echo "================================================================================"
+        echo "END OF REPORT"
+        echo "================================================================================"
+    } > "$organized_log"
+    
+    log_message "  Status-organized log: $organized_log"
+}
+
+create_check_index() {
+    local index_file="${CHECKS_DIR}/INDEX.log"
+    
+    {
+        echo "================================================================================"
+        echo "CSM PRE-UPGRADE CHECKS - INDIVIDUAL CHECK LOG INDEX"
+        echo "================================================================================"
+        echo "Generated: $(date)"
+        echo "Mode: $SCRIPT_MODE"
+        echo ""
+        echo "SUMMARY:"
+        echo "  Total Checks: $TOTAL_CHECKS"
+        echo "  Passed: $PASSED_CHECKS"
+        echo "  Info: $INFO_CHECKS"
+        echo "  Warnings: $WARNING_CHECKS"
+        echo "  Failed: $FAILED_CHECKS"
+        echo ""
+        echo "================================================================================"
+        echo ""
+        echo "Individual check log files are organized by status in:"
+        echo "  $CHECKS_DIR/"
+        echo "  ├── PASS/         (Passed checks)"
+        echo "  ├── INFO/         (Info checks)"
+        echo "  ├── WARNING/      (Warning checks)"
+        echo "  ├── FAIL/         (Failed checks)"
+        echo "  └── INDEX.log     (This file)"
+        echo ""
+        echo "Files organized by status:"
+        echo ""
+        
+        if [ "$PASSED_CHECKS" -gt 0 ]; then
+            echo "✓ PASSED CHECKS ($PASSED_CHECKS):"
+            echo "───────────────────────────────────────────────────────────────────────────────"
+            if [ -d "${CHECKS_DIR}/PASS" ]; then
+                ls -1 "${CHECKS_DIR}/PASS"/CHECK_*.log 2>/dev/null | while read f; do
+                    echo "  PASS/$(basename "$f")"
+                done
+            fi
+            echo ""
+        fi
+        
+        if [ "$INFO_CHECKS" -gt 0 ]; then
+            echo "ℹ INFO CHECKS ($INFO_CHECKS):"
+            echo "───────────────────────────────────────────────────────────────────────────────"
+            if [ -d "${CHECKS_DIR}/INFO" ]; then
+                ls -1 "${CHECKS_DIR}/INFO"/CHECK_*.log 2>/dev/null | while read f; do
+                    echo "  INFO/$(basename "$f")"
+                done
+            fi
+            echo ""
+        fi
+        
+        if [ "$WARNING_CHECKS" -gt 0 ]; then
+            echo "⚠ WARNING CHECKS ($WARNING_CHECKS):"
+            echo "───────────────────────────────────────────────────────────────────────────────"
+            if [ -d "${CHECKS_DIR}/WARNING" ]; then
+                ls -1 "${CHECKS_DIR}/WARNING"/CHECK_*.log 2>/dev/null | while read f; do
+                    echo "  WARNING/$(basename "$f")"
+                done
+            fi
+            echo ""
+        fi
+        
+        if [ "$FAILED_CHECKS" -gt 0 ]; then
+            echo "✗ FAILED CHECKS ($FAILED_CHECKS):"
+            echo "───────────────────────────────────────────────────────────────────────────────"
+            if [ -d "${CHECKS_DIR}/FAIL" ]; then
+                ls -1 "${CHECKS_DIR}/FAIL"/CHECK_*.log 2>/dev/null | while read f; do
+                    echo "  FAIL/$(basename "$f")"
+                done
+            fi
+            echo ""
+        fi
+        
+        echo "================================================================================"
+        echo "To view a specific check log:"
+        echo "  cat $CHECKS_DIR/PASS/CHECK_<number>_<check_name>.log"
+        echo "  cat $CHECKS_DIR/INFO/CHECK_<number>_<check_name>.log"
+        echo "  cat $CHECKS_DIR/FAIL/CHECK_<number>_<check_name>.log"
+        echo "  cat $CHECKS_DIR/WARNING/CHECK_<number>_<check_name>.log"
+        echo ""
+        echo "To view all PASS check logs:"
+        echo "  cat $CHECKS_DIR/PASS/CHECK_*.log"
+        echo ""
+        echo "To view all INFO check logs:"
+        echo "  cat $CHECKS_DIR/INFO/CHECK_*.log"
+        echo ""
+        echo "To view all FAIL check logs:"
+        echo "  cat $CHECKS_DIR/FAIL/CHECK_*.log"
+        echo ""
+        echo "To view all WARNING check logs:"
+        echo "  cat $CHECKS_DIR/WARNING/CHECK_*.log"
+        echo ""
+        echo "================================================================================"
+    } > "$index_file"
+    
+    log_message "  Check index: $index_file"
 }
 
 ################################################################################
@@ -1185,14 +1565,14 @@ main() {
     check_hardware_health
     check_csm_issues
     check_csm_17_specific
-    check_csm_diags_issues
-    check_hfp_issues
     # check_shs_issues
     check_slingshot_issues
     check_sma_issues
     # check_uss_issues
     check_architecture_issues
     check_iscsi_sessions
+    
+    CURRENT_CHECK_LOG_FILE=""
     
     # Print summary
     print_summary
