@@ -214,17 +214,17 @@ Once you've collected the logs and are ready to proceed with analysis, you can c
 
 ### Step 1: Compress the Log Folder
 
-Navigate to the log directory and create a compressed archive:
+Navigate to the log directory and create a compressed archive for the folders(both scripts outputs):
 
 **Using TAR (Recommended for Linux/Mac):**
 
 ```bash
 # Create a tar.gz archive of the logs
 cd /etc/cray/upgrade/csm/pre-checks/
-tar -czf pre_upgrade_checks_logs_$(date +%Y%m%d_%H%M%S).tar.gz checks_<timestamp>/
+tar -czf checks_$(date +%Y%m%d_%H%M%S).tar.gz checks_<timestamp>/
 
 # Or compress the entire pre-checks directory
-tar -czf pre_upgrade_checks_full_$(date +%Y%m%d_%H%M%S).tar.gz .
+tar -czf checks_$(date +%Y%m%d_%H%M%S).tar.gz .
 ```
 
 **Using ZIP (Works across all systems):**
@@ -252,20 +252,20 @@ unzip -l pre_upgrade_checks_logs_*.zip | head -20
 
 ```bash
 # Download from Cray system to your local machine
-scp your-username@your-cray-system:/etc/cray/upgrade/csm/pre-checks/pre_upgrade_checks_logs_*.tar.gz ./
+scp your-username@your-cray-system:/etc/cray/upgrade/csm/pre-checks/checks_*.tar.gz ./
 
 # Or for zip
-scp your-username@your-cray-system:/etc/cray/upgrade/csm/pre-checks/pre_upgrade_checks_logs_*.zip ./
+scp your-username@your-cray-system:/etc/cray/upgrade/csm/pre-checks/checks_*.zip ./
 ```
 
 ### Step 4: Extract on Your Local Machine (if needed)
 
 ```bash
 # For tar.gz
-tar -xzf pre_upgrade_checks_logs_*.tar.gz
+tar -xzf checks_*.tar.gz
 
 # For zip
-unzip pre_upgrade_checks_logs_*.zip
+unzip checks_*.zip
 ```
 
 ### Step 5: Use for Analysis
@@ -274,7 +274,7 @@ unzip pre_upgrade_checks_logs_*.zip
 
 ---
 
-## �🔍 Sample Output
+## Sample Output
 
 ### What You'll See in Terminal
 
