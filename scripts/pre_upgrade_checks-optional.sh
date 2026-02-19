@@ -43,7 +43,7 @@ CURRENT_CHECK_NAME=""
 CURRENT_CHECK_LOG_FILE=""
 
 # Directory for individual check logs
-CHECKS_DIR="${LOG_DIR}/checks_${TIMESTAMP}"
+CHECKS_DIR="${LOG_DIR}/checks_optional_${TIMESTAMP}"
 mkdir -p "$CHECKS_DIR"
 
 # Mode (pre-install or pre-upgrade)

@@ -208,7 +208,73 @@ ls /etc/cray/upgrade/csm/pre-checks/checks_*/failed_warnings/ | wc -l
 
 ---
 
-## 🔍 Sample Output
+## Preparing Logs for Analysis
+
+Once you've collected the logs and are ready to proceed with analysis, you can compress the log folder for transfer and analysis.
+
+### Step 1: Compress the Log Folder
+
+Navigate to the log directory and create a compressed archive:
+
+**Using TAR (Recommended for Linux/Mac):**
+
+```bash
+# Create a tar.gz archive of the logs
+cd /etc/cray/upgrade/csm/pre-checks/
+tar -czf pre_upgrade_checks_logs_$(date +%Y%m%d_%H%M%S).tar.gz checks_<timestamp>/
+
+# Or compress the entire pre-checks directory
+tar -czf pre_upgrade_checks_full_$(date +%Y%m%d_%H%M%S).tar.gz .
+```
+
+**Using ZIP (Works across all systems):**
+
+```bash
+# Create a zip archive of the logs
+cd /etc/cray/upgrade/csm/pre-checks/
+zip -r pre_upgrade_checks_logs_$(date +%Y%m%d_%H%M%S).zip checks_<timestamp>/
+
+# Or compress the entire pre-checks directory
+zip -r pre_upgrade_checks_full_$(date +%Y%m%d_%H%M%S).zip .
+```
+
+### Step 2: Verify the Archive
+
+```bash
+# For tar.gz - list contents
+tar -tzf pre_upgrade_checks_logs_*.tar.gz | head -20
+
+# For zip - list contents
+unzip -l pre_upgrade_checks_logs_*.zip | head -20
+```
+
+### Step 3: Transfer the Archive to Your Local Machine
+
+```bash
+# Download from Cray system to your local machine
+scp your-username@your-cray-system:/etc/cray/upgrade/csm/pre-checks/pre_upgrade_checks_logs_*.tar.gz ./
+
+# Or for zip
+scp your-username@your-cray-system:/etc/cray/upgrade/csm/pre-checks/pre_upgrade_checks_logs_*.zip ./
+```
+
+### Step 4: Extract on Your Local Machine (if needed)
+
+```bash
+# For tar.gz
+tar -xzf pre_upgrade_checks_logs_*.tar.gz
+
+# For zip
+unzip pre_upgrade_checks_logs_*.zip
+```
+
+### Step 5: Use for Analysis
+
+- Use the Similarity Search Engine for further proceedings
+
+---
+
+## �🔍 Sample Output
 
 ### What You'll See in Terminal
 
@@ -311,7 +377,7 @@ These provide additional insights:
    └─ Follow suggestions from the logs
 
 8. Re-run if you fixed something
-   └─ sudo bash /tmp/pre_upgrade_checks-required.sh
+   └─ bash /tmp/pre_upgrade_checks-required.sh
    └─ Verify everything now passes
 
 9. Proceed with actual upgrade
