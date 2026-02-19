@@ -1,197 +1,337 @@
-# CSM Pre-Upgrade Validation Suite
+# CPV - Cray Pre-Upgrade Validation
 
-Comprehensive read-only validation scripts for HPE Cray EX system upgrades from CSM 25.3.2 (1.6.2) to CSM 25.9.0 (1.7.0). These scripts identify and document known issues early in the upgrade process to ensure system readiness and prevent upgrade failures.
+A comprehensive system health check tool for validating readiness before CSM (Cray System Management) upgrades.
 
-## Overview
+## 📋 What is This?
 
-This repository provides production-ready pre-upgrade health check scripts that validate system readiness across multiple CSM components and subsystems. The scripts perform non-destructive checks, generate detailed logs, and provide clear guidance on issues found.
+CPV is a collection of pre-upgrade validation scripts designed to check your system for potential issues **before** you upgrade your Cray cluster. Think of it as a "pre-flight checklist" for your system upgrade - it scans your system, identifies problems, logs them, and gives you a detailed report so you know what needs to be fixed before upgrading.
 
-**Target Upgrade Path:** CSM 25.3.2 (1.6.2) → CSM 25.9.0 (1.7.0)
+**Key Point:** These scripts are **read-only** - they don't change anything on your system, they just inspect and report.
 
-## Scripts
+---
 
-### pre_upgrade_checks-1.sh
-**Purpose:** Deep health checks based on recommended customer commands
+## 🚀 Quick Start Guide
 
-- Runs comprehensive system validation using kubectl, helm, cray CLI, and other tools
-- Organizes output into passed/failed categories
-- Generates timestamped logs for documentation
-- Validates deeper system state beyond basic availability checks
+### Step 1: Clone the Repository to Your Local Machine
 
-**Usage:**
+Open your terminal and run:
+
 ```bash
-chmod +x scripts/pre_upgrade_checks-1.sh
-./scripts/pre_upgrade_checks-1.sh
+git clone https://github.com/keshav-06-hpe/cpv.git
 ```
 
-### pre_upgrade_checks-2.sh
-**Purpose:** Complete pre-install and pre-upgrade validation framework
+Or if you prefer SSH:
 
-- Full validation suite covering all known upgrade blockers
-- Supports both pre-install and pre-upgrade modes
-- Color-coded output for easy issue identification
-- Comprehensive logging with detailed results
-
-**Usage:**
 ```bash
-chmod +x scripts/pre_upgrade_checks-2.sh
-./scripts/pre_upgrade_checks-2.sh
+git clone git@github.com:keshav-06-hpe/cpv.git
 ```
 
-## Validation Coverage
+Then navigate into the folder:
 
-### CSM Core Components
-- Active IUF (Integrated Upgrade Framework) sessions
-- Nexus repository space utilization (80% threshold warning)
-- Kafka CRD (Custom Resource Definition) configuration
-- Container image signing and verification readiness
-
-### System Prerequisites
-- Running BOS (Boot Orchestration Service) sessions
-- Running CFS (Configuration Framework Service) sessions
-- HSM (Hardware State Manager) duplicate events
-- Switch admin credentials in vault
-- Documentation packages availability
-
-### Application Stacks
-- **CSM Diags:** Slurm configuration, multi-tenancy checks, current installation status
-- **Hardware Firmware Pack (HFP):** EX254n blade firmware versions, FAS loader status
-- **Slingshot Host Software (SHS):** SS10 compatibility, MPI job limits, CXI service config
-- **Slingshot Fabric:** Certificate Manager health, filesystem space, Velero backup status
-- **System Monitoring Application (SMA):** Helm release states, OpenSearch pod health, Kafka topics, LDMS compatibility
-- **User Services Software (USS):** PBS Pro version, Slurm version, NMD configuration, GPU compatibility
-- **Architecture-Specific:** aarch64 crash utility validation
-
-### Infrastructure Health
-- Kubernetes node status
-- Critical system pods (kube-system, services, nexus, vault namespaces)
-- Ceph storage health (when available)
-- Network connectivity and configuration
-- Disk space and storage validation
-
-## Output and Logging
-
-### Console Output
-- **Color-coded format:**
-  - 🟢 **Green (PASS)** - Check succeeded
-  - 🟡 **Yellow (WARNING)** - Potential issue, review recommended
-  - 🔴 **Red (FAIL)** - Critical blocker, must be addressed
-  - 🔵 **Blue (INFO)** - Informational messages
-
-### Log Files
-- **Location:** `/etc/cray/upgrade/csm/pre-checks/`
-- **Naming:** `checks_YYYYMMDD_HHMMSS/` (timestamped directories)
-- **Organization:**
-  - `passed/` - Successful check logs
-  - `failed_warnings/` - Issues requiring attention
-
-### Exit Codes
-- `0` - All checks passed, system ready for upgrade
-- `1` - One or more critical failures detected
-- `2` - Warnings present, review recommended
-
-## Requirements
-
-### System Requirements
-- Bash shell (version 4.0+)
-- Root or equivalent privileges for full validation
-- Management node access recommended
-
-### Required Tools
-The scripts gracefully handle missing tools with appropriate warnings. For full validation, ensure:
-- `kubectl` - Kubernetes cluster interaction
-- `helm` - Helm chart and release management
-- `cray` - Cray CLI for system operations
-- `iuf` - IUF session status
-- `vault` - Credential management
-- `nexus` - Repository management
-
-Optional but recommended:
-- `ceph` - Ceph storage health (if applicable)
-- `jq` - JSON processing
-
-## Quick Start
-
-### 1. Prepare Scripts
 ```bash
-cd cpv/scripts
-chmod +x pre_upgrade_checks-*.sh
+cd cpv
 ```
 
-### 2. Run Pre-Upgrade Validation
+### Step 2: Understand the Scripts
+
+This repository contains two main scripts in the `scripts/` folder:
+
+- **`pre_upgrade_checks-required.sh`** - **RUN THIS FIRST!**
+  - Performs critical health checks required before upgrade
+  - Checks for known issues that could block your upgrade
+  - Takes ~15-20 minutes to run
+  - **Must pass** before proceeding with upgrade
+
+- **`pre_upgrade_checks-optional.sh`** - **RUN THIS SECOND**
+  - Performs additional deep diagnostic checks
+  - Helps identify non-critical issues and system information
+  - Takes ~1-2 minutes to run
+  - Recommended but not mandatory
+
+### Step 3: Run the Scripts
+
+**On your Cray cluster system**, run the scripts with elevated permissions:
+
 ```bash
-# Run main pre-upgrade check
-./pre_upgrade_checks-1.sh
-./pre_upgrade_checks-2.sh
+# Run the required checks first
+bash scripts/pre_upgrade_checks-required.sh
+
+# Then run the optional checks
+bash scripts/pre_upgrade_checks-optional.sh
 ```
 
-### 3. Review Results
-- Check console output for any FAIL or WARNING items
-- Review log files in `/etc/cray/upgrade/csm/pre-checks/`
-- Refer to [PRE_UPGRADE_CHECKS_README.md](docs/PRE_UPGRADE_CHECKS_README.md) for issue explanations
+---
 
-### 4. Address Issues
-- Critical FAILs must be resolved before proceeding
-- WARNINGs should be reviewed and handled as appropriate for your environment
+## 📊 What Happens When You Run It?
 
-## Documentation
+### Before It Starts
 
-For detailed information about specific checks and how to address issues:
+1. Scripts create a timestamped folder to store all results
+2. Sets up the logging structure
+3. Counts total checks to run
 
-- **[PRE_UPGRADE_CHECKS_README.md](docs/PRE_UPGRADE_CHECKS_README.md)** - Comprehensive explanation of all checks, expected results, and troubleshooting
+### While It's Running
 
-- **[PRE_UPGRADE_SCRIPT_ENHANCEMENT_GUIDE.md](docs/PRE_UPGRADE_SCRIPT_ENHANCEMENT_GUIDE.md)** - Guide for extending scripts with new validation checks using CSM documentation
+1. Each check is executed one by one
+2. Results are printed to your terminal in **real-time** with color coding:
+   - 🟢 **GREEN** = Check passed
+   - 🔴 **RED** = Check failed (problem found)
+   - 🟡 **YELLOW** = Check warning (something to watch)
+   - 🔵 **BLUE** = Information message
 
-- **[CSM_Upgrade_25.3.2_to_25.9.0_Summary.md](docs/CSM_Upgrade_25.3.2_to_25.9.0_Summary.md)** - Complete upgrade checklist with software versions, new features in CSM 1.7.0, and integration with official HPE documentation
+3. All output is also saved to log files
 
+### When It Completes
 
-## Troubleshooting
+1. Summary report shows:
+   - Total checks run
+   - How many passed
+   - How many failed
+   - How many warnings
+   - Which specific checks failed (if any)
 
-### Scripts Not Executable
-```bash
-chmod +x scripts/pre_upgrade_checks-*.sh
+2. Detailed logs saved for your records
+
+---
+
+## 📁 Where Are the Logs Stored?
+
+### Log Directory Location
+
+```
+/etc/cray/upgrade/csm/pre-checks/
 ```
 
-### Command Not Found
-- Verify required tools are in system PATH
-- Scripts handle missing commands gracefully with warnings
-- Some checks will be skipped if tools are unavailable
+This is where **ALL** logs and results are stored.
 
 
-### Permission Denied
-- Ensure running with appropriate privileges (root recommended)
-- Some checks require elevated permissions to access system state
+### Understanding Log Timestamps
 
-## Development & Contributing
+Each time you run the script, a new folder is created with today's date and time:
+- `20250219_143022` means Feb 19, 2025 at 14:30:22 (2:30 PM)
 
-### Adding New Checks
-See [PRE_UPGRADE_SCRIPT_ENHANCEMENT_GUIDE.md](docs/PRE_UPGRADE_SCRIPT_ENHANCEMENT_GUIDE.md) for detailed instructions on:
-- Leveraging CSM official documentation
-- Using helper functions for consistency
-- Writing read-only validation code
-- Proper logging and output formatting
+This way, you can keep multiple runs for comparison.
 
-### Best Practices
-- Keep all checks read-only (no modifications to system state)
-- Use provided helper functions for consistent output and logging
-- Add clear, descriptive check names and messages
-- Document new checks with references to CSM documentation
-- Test with both passing and failing conditions
+---
 
-## Support & Issues
+## 📖 How to Read the Logs
 
-For issues with the validation scripts or questions about upgrade readiness:
-1. Review relevant documentation in the `docs/` directory
-2. Check log files for detailed error information
-3. Cross-reference with official CSM upgrade documentation
+### Quick Summary
 
-## Version Information
+After the script runs, look for the main output at the end:
 
-- **Script Version:** 1.1
-- **Target CSM Version:** 25.9.0 (1.7.0)
-- **Source CSM Version:** 25.3.2 (1.6.2)
-- **Last Updated:** February 2026
+```
+========================================
+SUMMARY REPORT
+========================================
+Total Checks:     50
+Passed:           48
+Failed:            1
+Warnings:          1
 
-## License & Usage
+Failed Checks:
+  - CHECK_015: Kernel Version Too Old
 
-These scripts are designed for use during CSM system upgrades. They are non-destructive and perform read-only validation only.
+Warning Checks:
+  - CHECK_023: Disk Space Below 20%
+```
+
+### Detailed Check Logs
+
+For each failed check, go to:
+```
+/etc/cray/upgrade/csm/pre-checks/checks_[TIMESTAMP]/failed_warnings/
+```
+
+Open the file to see:
+- What was checked
+- What was expected
+- What was actually found
+- Suggested fix
+
+**Example file name:** `[FAIL]_CHECK_015_Kernel_Version.log`
+
+### View Logs in Terminal
+
+```bash
+# View the main summary
+cat /etc/cray/upgrade/csm/pre-checks/pre_upgrade_checks_*.log
+
+# View a specific failed check
+cat /etc/cray/upgrade/csm/pre-checks/checks_*/failed_warnings/[FAIL]_*.log
+
+# View all passed checks
+ls /etc/cray/upgrade/csm/pre-checks/checks_*/passed/
+
+# Count total passed/failed
+ls /etc/cray/upgrade/csm/pre-checks/checks_*/passed/ | wc -l
+ls /etc/cray/upgrade/csm/pre-checks/checks_*/failed_warnings/ | wc -l
+```
+
+---
+
+## 🔍 Sample Output
+
+### What You'll See in Terminal
+
+```
+========================================
+CSM Pre-Upgrade Health Checks
+========================================
+
+[CHECK 1/50] DNS Resolution
+[RUN] nslookup google.com
+[PASS] DNS Resolution
+
+[CHECK 2/50] Network Connectivity
+[RUN] ping -c 1 8.8.8.8
+[PASS] Network Connectivity
+
+[CHECK 15/50] Kernel Version
+[RUN] uname -r
+[FAIL] Kernel Version Too Old - Required: 5.15+ Found: 5.10
+⚠️  This may impact upgrade
+
+========================================
+SUMMARY REPORT
+========================================
+Total Checks:     50
+Passed:           48
+Failed:            1
+Warnings:          1
+
+❌ ACTION REQUIRED:
+  1. Fix the 1 failed check before upgrading
+  2. Review 1 warning for potential issues
+```
+
+---
+
+## 🛠️ What Gets Checked?
+
+### Required Checks (required.sh)
+
+These are critical - upgrade will fail if these don't pass:
+
+1. ✅ System disk space availability
+2. ✅ Required services running
+3. ✅ Network connectivity
+4. ✅ DNS resolution
+5. ✅ Kernel version compatibility
+6. ✅ Memory availability
+7. ✅ Necessary packages installed
+8. ✅ Port availability
+9. ✅ File system integrity
+10. ... and many more critical checks
+
+### Optional Checks (optional.sh)
+
+These provide additional insights:
+
+1. ℹ️ Current system configuration
+2. ℹ️ Hardware information
+3. ℹ️ Running process list
+4. ℹ️ Open ports
+5. ℹ️ System logs for errors
+6. ℹ️ Known issue detection
+7. ℹ️ Performance metrics
+8. ... and detailed diagnostic data
+
+---
+
+## 📝 Typical Workflow
+
+### Step-by-Step Process
+
+```
+1. Clone this repository
+   └─ cd cpv
+
+2. Copy scripts to your Cray system
+   └─ scp scripts/*.sh your-cray-system:/tmp/
+
+3. SSH into your Cray system
+   └─ ssh your-cray-system
+
+4. Run required checks
+   └─ bash /tmp/pre_upgrade_checks-required.sh
+   └─ Review output for any failures
+
+5. If no failures, run optional checks
+   └─ bash /tmp/pre_upgrade_checks-optional.sh
+   └─ Review detailed results
+
+6. Check the logs directory
+   └─ ls /etc/cray/upgrade/csm/pre-checks/
+   └─ Review any failed checks
+
+7. Fix any issues found
+   └─ Follow suggestions from the logs
+
+8. Re-run if you fixed something
+   └─ sudo bash /tmp/pre_upgrade_checks-required.sh
+   └─ Verify everything now passes
+
+9. Proceed with actual upgrade
+   └─ You're good to go!
+```
+
+---
+
+## 🚨 Troubleshooting
+
+### "Permission Denied" Error
+
+**Problem:** You didn't use `sudo`
+
+**Solution:**
+```bash
+sudo bash scripts/pre_upgrade_checks-required.sh
+```
+
+### "Command not found" Error
+
+**Problem:** The script path is incorrect
+
+**Solution:**
+```bash
+# Make sure you're in the cpv directory
+cd /path/to/cpv
+
+# Then run
+sudo bash scripts/pre_upgrade_checks-required.sh
+```
+
+### "Can't access log directory" Error
+
+**Problem:** The log directory doesn't exist or you don't have permissions
+
+**Solution:**
+```bash
+# Create the directory
+sudo mkdir -p /etc/cray/upgrade/csm/pre-checks
+
+# Give yourself permission
+sudo chmod 755 /etc/cray/upgrade/csm/pre-checks
+
+# Try running the script again
+sudo bash scripts/pre_upgrade_checks-required.sh
+```
+
+### How Do I Know If It's Still Running?
+
+The script can take 5-30 minutes depending on checks. You'll know it's working if:
+- Terminal shows colored output
+- New log files are being created (check: `ls /etc/cray/upgrade/csm/pre-checks/checks_*/`)
+- You can see timestamps changing
+
+### Script Crashed or Got Interrupted?
+
+No problem! Just run it again:
+```bash
+sudo bash scripts/pre_upgrade_checks-required.sh
+```
+
+Each run creates a **new** timestamped folder, so old results aren't lost.
+
+---
