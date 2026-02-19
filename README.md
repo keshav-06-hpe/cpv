@@ -48,17 +48,48 @@ This repository contains two main scripts in the `scripts/` folder:
   - Takes ~1-2 minutes to run
   - Recommended but not mandatory
 
-### Step 3: Run the Scripts
+### Step 3: Set Up Switch Admin Password
+
+Before running the required checks, you need to provide the switch admin password. This is used for accessing network switch information during validation.
+
+**Run this command FIRST:**
+
+```bash
+read -r -s -p "Switch admin password: " SW_ADMIN_PASSWORD
+
+export SW_ADMIN_PASSWORD
+```
+
+**What this does:**
+- `-r` = Don't interpret backslashes
+- `-s` = Silent mode (password won't be displayed as you type)
+- `-p` = Prompts you with the message "Switch admin password: "
+- `export` = Makes the password available to the scripts
+
+The prompt will wait for you to type your password and press Enter. Your typing won't be visible (for security) - that's normal!
+
+**Example:**
+```
+$ read -r -s -p "Switch admin password: " SW_ADMIN_PASSWORD
+Switch admin password: [you type here but nothing shows]
+$ export SW_ADMIN_PASSWORD
+$ 
+```
+
+### Step 4: Run the Scripts
 
 **On your Cray cluster system**, run the scripts with elevated permissions:
 
+
 ```bash
-# Run the required checks first
+# Run the required checks first (uses the password you just exported)
 bash scripts/pre_upgrade_checks-required.sh
 
 # Then run the optional checks
 bash scripts/pre_upgrade_checks-optional.sh
 ```
+
+> **⚠️ Important:** When running `pre_upgrade_checks-required.sh`, you will be prompted to provide input for the **test_bican_internal** test. Please have the necessary information ready when the script asks for it.
 
 ---
 
@@ -135,6 +166,8 @@ Failed Checks:
 Warning Checks:
   - CHECK_023: Disk Space Below 20%
 ```
+
+> **💡 Note about Optional Script:** If you run the optional checks script and notice that the total checks don't sum up perfectly, don't worry! All check files (including skipped or non-critical checks) can be viewed in the `/etc/cray/upgrade/csm/pre-checks/checks_<timestamp>` directory. This is normal behavior and simply means some checks were conditional or grouped.
 
 ### Detailed Check Logs
 
@@ -253,8 +286,12 @@ These provide additional insights:
 3. SSH into your Cray system
    └─ ssh your-cray-system
 
-4. Run required checks
-   └─ bash /tmp/pre_upgrade_checks-required.sh
+4. Set the switch admin password
+   └─ read -r -s -p "Switch admin password: " SW_ADMIN_PASSWORD
+   └─ export SW_ADMIN_PASSWORD
+
+5. Run required checks
+   └─ sudo bash /tmp/pre_upgrade_checks-required.sh
    └─ Review output for any failures
 
 5. If no failures, run optional checks
@@ -333,5 +370,4 @@ sudo bash scripts/pre_upgrade_checks-required.sh
 ```
 
 Each run creates a **new** timestamped folder, so old results aren't lost.
-
 ---
