@@ -23,10 +23,10 @@ WARNING_CHECKS=0
 INFO_CHECKS=0
 
 # Log file
-LOG_DIR="/etc/cray/upgrade/csm/pre-checks"
+LOG_DIR="/opt/cray/tests/cpv"
 mkdir -p "$LOG_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-LOG_FILE="${LOG_DIR}/pre_upgrade_checks_${TIMESTAMP}.log"
+LOG_FILE="${LOG_DIR}/pre_upgrade_checks_optional_${TIMESTAMP}.log"
 
 # Note: Individual check logs are organized in PASS/FAIL/WARNING subdirectories
 # No separate consolidated status log files needed

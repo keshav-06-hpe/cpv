@@ -4,9 +4,9 @@
 # Purpose: Run deeper read-only checks based on recommended customer commands
 ################################################################################
 
-LOG_DIR="/etc/cray/upgrade/csm/pre-checks"
+LOG_DIR="/opt/cray/tests/cpv"
 mkdir -p "$LOG_DIR"
-LOG_BASE="${LOG_DIR}/checks_$(date +%Y%m%d_%H%M%S)"
+LOG_BASE="${LOG_DIR}/checks_required_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOG_BASE"
 mkdir -p "$LOG_BASE/passed"
 mkdir -p "$LOG_BASE/failed_warnings"
