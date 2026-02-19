@@ -184,6 +184,11 @@ Open the file to see:
 
 **Example file name:** `[FAIL]_CHECK_015_Kernel_Version.log`
 
+> **🔍 Important Note for pre_upgrade_checks-required.sh:** When you receive the collective logs at the end, check the files in the `failed_warnings/` directory carefully. Not all issues listed there are necessarily **actual failures**. Some may be **false positives** or informational items. Always review the details in each log file to understand:
+> - Is this a real problem that needs fixing?
+> - Or is this just a warning/informational flag that can be safely ignored?
+> - The log will contain context to help you determine the severity
+
 ### View Logs in Terminal
 
 ```bash
