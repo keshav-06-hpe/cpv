@@ -26,7 +26,7 @@ INFO_CHECKS=0
 LOG_DIR="/opt/cray/tests/cpv"
 mkdir -p "$LOG_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-LOG_FILE="${LOG_DIR}/pre_upgrade_checks_optional_${TIMESTAMP}.log"
+LOG_FILE="${LOG_DIR}/checks_optional_${TIMESTAMP}/pre_upgrade_checks_optional_${TIMESTAMP}.log"
 
 # Note: Individual check logs are organized in PASS/FAIL/WARNING subdirectories
 # No separate consolidated status log files needed
@@ -1361,7 +1361,7 @@ print_summary() {
 }
 
 organize_logs_by_status() {
-    local organized_log="${LOG_DIR}/pre_upgrade_checks_${TIMESTAMP}_BY_STATUS.log"
+    local organized_log="${LOG_DIR}/checks_optional_${TIMESTAMP}/pre_upgrade_checks_${TIMESTAMP}_BY_STATUS.log"
     
     {
         echo "================================================================================"

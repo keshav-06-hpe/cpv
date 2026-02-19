@@ -179,7 +179,7 @@ bash scripts/pre_upgrade_checks-optional.sh
 ### Log Directory Location
 
 ```
-/opt/cray/tests/pre-checks/
+/opt/cray/tests/cpv/
 ```
 
 This is where **ALL** logs and results are stored.
@@ -218,13 +218,13 @@ Warning Checks:
   - CHECK_023: Disk Space Below 20%
 ```
 
-> **💡 Note about Optional Script:** If you run the optional checks script and notice that the total checks don't sum up perfectly, don't worry! All check files (including skipped or non-critical checks) can be viewed in the `/opt/cray/tests/pre-checks/checks_optional_<timestamp>` directory. This is normal behavior and simply means some checks were conditional or grouped.
+> **💡 Note about Optional Script:** If you run the optional checks script and notice that the total checks don't sum up perfectly, don't worry! All check files (including skipped or non-critical checks) can be viewed in the `/opt/cray/tests/cpv/checks_optional_<timestamp>` directory. This is normal behavior and simply means some checks were conditional or grouped.
 
 ### Detailed Check Logs
 
 For each failed check, go to:
 ```
-/opt/cray/tests/pre-checks/checks_[TIMESTAMP]/failed_warnings/
+/opt/cray/tests/cpv/checks_required_[TIMESTAMP]/failed_warnings/
 ```
 
 Open the file to see:
@@ -244,17 +244,17 @@ Open the file to see:
 
 ```bash
 # View the main summary
-cat /opt/cray/tests/pre-checks/pre_upgrade_checks_*.log
+cat /opt/cray/tests/cpv/pre_upgrade_checks_*.log
 
 # View a specific failed check
-cat /opt/cray/tests/pre-checks/checks_*/failed_warnings/[FAIL]_*.log
+cat /opt/cray/tests/cpv/checks_required_*/failed_warnings/[FAIL]_*.log
 
 # View all passed checks
-ls /opt/cray/tests/pre-checks/checks_*/passed/
+ls /opt/cray/tests/cpv/checks_required_*/passed/
 
 # Count total passed/failed
-ls /opt/cray/tests/pre-checks/checks_*/passed/ | wc -l
-ls /opt/cray/tests/pre-checks/checks_*/failed_warnings/ | wc -l
+ls /opt/cray/tests/cpv/checks_required_*/passed/ | wc -l
+ls /opt/cray/tests/cpv/checks_required_*/failed_warnings/ | wc -l
 ```
 
 ---
@@ -271,42 +271,33 @@ Navigate to the log directory and create a compressed archive for the folders(bo
 
 ```bash
 # Create a tar.gz archive of the logs
-cd /opt/cray/tests/pre-checks/
-tar -czf checks_$(date +%Y%m%d_%H%M%S).tar.gz checks_<timestamp>/
+cd /opt/cray/tests/cpv/
+tar -czf checks_required_$(date +%Y%m%d_%H%M%S).tar.gz checks_required_<timestamp>/
+tar -czf checks_optional_$(date +%Y%m%d_%H%M%S).tar.gz checks_optional_<timestamp>/
 
-# Or compress the entire pre-checks directory
-tar -czf checks_$(date +%Y%m%d_%H%M%S).tar.gz .
 ```
 
 **Using ZIP (Works across all systems):**
 
 ```bash
 # Create a zip archive of the logs
-cd /opt/cray/tests/pre-checks/
-zip -r pre_upgrade_checks_logs_$(date +%Y%m%d_%H%M%S).zip checks_<timestamp>/
+cd /opt/cray/tests/cpv/
+zip -r checks_required_$(date +%Y%m%d_%H%M%S).zip checks_required_<timestamp>/
+zip -r checks_optional_$(date +%Y%m%d_%H%M%S).zip checks_optional_<timestamp>/
 
-# Or compress the entire pre-checks directory
-zip -r pre_upgrade_checks_full_$(date +%Y%m%d_%H%M%S).zip .
 ```
 
-### Step 2: Verify the Archive
 
-```bash
-# For tar.gz - list contents
-tar -tzf pre_upgrade_checks_logs_*.tar.gz | head -20
-
-# For zip - list contents
-unzip -l pre_upgrade_checks_logs_*.zip | head -20
-```
-
-### Step 3: Transfer the Archive to Your Local Machine
+### Step 2: Transfer the Archive to Your Local Machine
 
 ```bash
 # Download from Cray system to your local machine
-scp your-username@your-cray-system:/opt/cray/tests/pre-checks/checks_*.tar.gz ./
+scp your-username@your-cray-system:/opt/cray/tests/cpv/checks_required_*.tar.gz ./
+scp your-username@your-cray-system:/opt/cray/tests/cpv/checks_optional_*.tar.gz ./
 
 # Or for zip
-scp your-username@your-cray-system:/opt/cray/tests/pre-checks/checks_*.zip ./
+scp your-username@your-cray-system:/opt/cray/tests/cpv/checks_required_*.zip ./
+scp your-username@your-cray-system:/opt/cray/tests/cpv/checks_optional_*.zip ./
 ```
 
 ### Step 4: Extract on Your Local Machine (if needed)
@@ -359,38 +350,6 @@ Warnings:          1
   1. Fix the 1 failed check before upgrading
   2. Review 1 warning for potential issues
 ```
-
----
-
-## 🛠️ What Gets Checked?
-
-### Required Checks (required.sh)
-
-These are critical - upgrade will fail if these don't pass:
-
-1. ✅ System disk space availability
-2. ✅ Required services running
-3. ✅ Network connectivity
-4. ✅ DNS resolution
-5. ✅ Kernel version compatibility
-6. ✅ Memory availability
-7. ✅ Necessary packages installed
-8. ✅ Port availability
-9. ✅ File system integrity
-10. ... and many more critical checks
-
-### Optional Checks (optional.sh)
-
-These provide additional insights:
-
-1. ℹ️ Current system configuration
-2. ℹ️ Hardware information
-3. ℹ️ Running process list
-4. ℹ️ Open ports
-5. ℹ️ System logs for errors
-6. ℹ️ Known issue detection
-7. ℹ️ Performance metrics
-8. ... and detailed diagnostic data
 
 ---
 
@@ -468,10 +427,10 @@ sudo bash scripts/pre_upgrade_checks-required.sh
 **Solution:**
 ```bash
 # Create the directory
-sudo mkdir -p /opt/cray/tests/pre-checks
+sudo mkdir -p /opt/cray/tests/cpv
 
 # Give yourself permission
-sudo chmod 755 /opt/cray/tests/pre-checks
+sudo chmod 755 /opt/cray/tests/cpv
 
 # Try running the script again
 bash scripts/pre_upgrade_checks-required.sh
@@ -481,7 +440,7 @@ bash scripts/pre_upgrade_checks-required.sh
 
 The script can take 5-30 minutes depending on checks. You'll know it's working if:
 - Terminal shows colored output
-- New log files are being created (check: `ls /opt/cray/tests/pre-checks/checks_*/`)
+- New log files are being created (check: `ls /opt/cray/tests/cpv/checks_*/`)
 - You can see timestamps changing
 
 ### Script Crashed or Got Interrupted?
