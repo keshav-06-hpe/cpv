@@ -18,14 +18,17 @@ mkdir -p "$LOG_BASE"
 mkdir -p "$LOG_BASE/passed"
 mkdir -p "$LOG_BASE/failed"
 mkdir -p "$LOG_BASE/warnings"
+mkdir -p "$LOG_BASE/empty_output"
 
 # Counters
 TOTAL_CHECKS=0
 PASSED_CHECKS=0
 FAILED_CHECKS=0
 WARNING_CHECKS=0
+EMPTY_OUTPUT_CHECKS=0
 FAILED_LABELS=()
 WARNING_LABELS=()
+EMPTY_OUTPUT_LABELS=()
 
 record_fail() {
     local label="$1"
@@ -37,59 +40,65 @@ record_warn() {
     WARNING_LABELS+=("$label")
 }
 
-log_cmd() {
+record_empty() {
     local label="$1"
-    shift
+    EMPTY_OUTPUT_LABELS+=("$label")
+}
+
+execute_and_validate() {
+    local label="$1"
+    local required_regex="$2"
+    local forbidden_regex="$3"
+    local warn_regex="$4"
+    local exec_method="$5"
+    shift 5
+    
     local out_file="$LOG_BASE/failed/${label}.log"
     TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
-    echo "[RUN] $*" | tee -a "$out_file"
-    "$@" >> "$out_file" 2>&1
-    local rc=${PIPESTATUS[0]}
-    if [ $rc -eq 0 ]; then
-        if ! validate_output "$label" "$out_file" "" "" ""; then
-            FAILED_CHECKS=$((FAILED_CHECKS + 1))
-            record_fail "$label"
-            return 1
-        fi
-        PASSED_CHECKS=$((PASSED_CHECKS + 1))
-        # Move to passed directory on success
-        mv "$out_file" "$LOG_BASE/passed/${label}.log"
-        echo -e "${GREEN}✓ PASS${NC}: $label" | tee -a "$LOG_BASE/passed/${label}.log"
+    
+    # Execute command based on method (only echo to console, not to log file)
+    if [ "$exec_method" = "shell" ]; then
+        local cmd="$1"
+        echo "[RUN] $cmd"
+        bash -c "set -o pipefail; $cmd" >> "$out_file" 2>&1
     else
+        echo "[RUN] $@"
+        "$@" >> "$out_file" 2>&1
+    fi
+    
+    local rc=${PIPESTATUS[0]}
+    
+    # Check exit status first: if non-zero, it's definitely a failure
+    if [ $rc -ne 0 ]; then
         FAILED_CHECKS=$((FAILED_CHECKS + 1))
         record_fail "$label"
-        echo -e "${RED}✗ FAIL${NC}: $label (exit $rc)" | tee -a "$out_file"
+        echo -e "${RED}✗ FAIL${NC}: $label (exit $rc)"
+        return $rc
     fi
-    return $rc
+    
+    # Exit status is 0, now check output patterns
+    if ! validate_output "$label" "$out_file" "$required_regex" "$forbidden_regex" "$warn_regex"; then
+        FAILED_CHECKS=$((FAILED_CHECKS + 1))
+        record_fail "$label"
+        return 1
+    fi
+    
+    PASSED_CHECKS=$((PASSED_CHECKS + 1))
+    mv "$out_file" "$LOG_BASE/passed/${label}.log"
+    echo -e "${GREEN}✓ PASS${NC}: $label" | tee -a "$LOG_BASE/passed/${label}.log"
+    return 0
+}
+
+# Wrapper functions for convenience
+log_cmd() {
+    execute_and_validate "$1" "" "" "" "cmd" "${@:2}"
 }
 
 log_shell() {
-    local label="$1"
-    local cmd="$2"
-    local out_file="$LOG_BASE/failed/${label}.log"
-    TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
-    echo "[RUN] $cmd" | tee -a "$out_file"
-    bash -c "set -o pipefail; $cmd" >> "$out_file" 2>&1
-    local rc=${PIPESTATUS[0]}
-    if [ $rc -eq 0 ]; then
-        if ! validate_output "$label" "$out_file" "" "" ""; then
-            FAILED_CHECKS=$((FAILED_CHECKS + 1))
-            record_fail "$label"
-            return 1
-        fi
-        PASSED_CHECKS=$((PASSED_CHECKS + 1))
-        # Move to passed directory on success
-        mv "$out_file" "$LOG_BASE/passed/${label}.log"
-        echo -e "${GREEN}✓ PASS${NC}: $label" | tee -a "$LOG_BASE/passed/${label}.log"
-    else
-        FAILED_CHECKS=$((FAILED_CHECKS + 1))
-        record_fail "$label"
-        echo -e "${RED}✗ FAIL${NC}: $label (exit $rc)" | tee -a "$out_file"
-    fi
-    return $rc
+    execute_and_validate "$1" "" "" "" "shell" "$2"
 }
 
-FORBIDDEN_GENERIC_REGEX='(^|[^a-z])fail(ed|ure)?([^a-z]|$)|(^|[^a-z])warn(ing)?([^a-z]|$)|(^|[^a-z])error([^a-z]|$)|(^|[^a-z])critical([^a-z]|$)|exception|traceback'
+FORBIDDEN_GENERIC_REGEX='(^|[^a-z])fail(ed|ure)?([^a-z]|$)|(^|[^a-z])error([^a-z]|$)|(^|[^a-z])critical([^a-z]|$)|exception|traceback'
 
 strip_ansi() {
     sed 's/\x1b\[[0-9;]*m//g'
@@ -103,34 +112,42 @@ validate_output() {
     local warn_regex="$5"
     local failed=0
 
-    if ! grep -q "[^[:space:]]" "$out_file"; then
-        echo -e "${RED}✗ FAIL${NC}: $label (no output)" | tee -a "$out_file"
+    # Create a temp file with ANSI codes stripped and metadata lines removed
+    local temp_clean="$out_file.clean"
+    strip_ansi < "$out_file" | grep -v '^\[RUN\]' | grep -v '^✓ PASS' | grep -v '^✗ FAIL' | grep -v '^⚠ EMPTY' | grep -v '^⚠ WARN' > "$temp_clean"
+
+    if ! grep -q "[^[:space:]]" "$temp_clean"; then
+        EMPTY_OUTPUT_CHECKS=$((EMPTY_OUTPUT_CHECKS + 1))
+        record_empty "$label"
+        echo -e "${YELLOW}⚠ EMPTY${NC}: $label (no command output)"
+        # Move to empty_output directory
+        if [ -f "$out_file" ]; then
+            local empty_file="$LOG_BASE/empty_output/${label}.log"
+            mv "$out_file" "$empty_file"
+        fi
+        rm -f "$temp_clean"
         return 1
     fi
 
-    # Create a temp file with ANSI codes stripped for validation
-    local temp_clean="$out_file.clean"
-    strip_ansi < "$out_file" > "$temp_clean"
-
     if [ -n "$required_regex" ] && ! grep -Eiq "$required_regex" "$temp_clean"; then
-        echo -e "${RED}✗ FAIL${NC}: $label (missing required pattern)" | tee -a "$out_file"
+        echo -e "${RED}✗ FAIL${NC}: $label (missing required pattern)"
         failed=1
     fi
 
     if grep -Eiq "$FORBIDDEN_GENERIC_REGEX" "$temp_clean"; then
-        echo -e "${RED}✗ FAIL${NC}: $label (generic failure pattern detected)" | tee -a "$out_file"
+        echo -e "${RED}✗ FAIL${NC}: $label (generic failure pattern detected)"
         failed=1
     fi
 
     if [ -n "$forbidden_regex" ] && grep -Eiq "$forbidden_regex" "$temp_clean"; then
-        echo -e "${RED}✗ FAIL${NC}: $label (forbidden pattern detected)" | tee -a "$out_file"
+        echo -e "${RED}✗ FAIL${NC}: $label (forbidden pattern detected)"
         failed=1
     fi
 
     if [ -n "$warn_regex" ] && grep -Eiq "$warn_regex" "$temp_clean"; then
         WARNING_CHECKS=$((WARNING_CHECKS + 1))
         record_warn "$label"
-        echo -e "${YELLOW}⚠ WARN${NC}: $label (warning pattern detected)" | tee -a "$out_file"
+        echo -e "${YELLOW}⚠ WARN${NC}: $label (warning pattern detected)"
         # Move to warnings directory if it's a warning
         if [ -f "$out_file" ]; then
             local warn_file="$LOG_BASE/warnings/${label}.log"
@@ -143,65 +160,11 @@ validate_output() {
 }
 
 log_cmd_validate() {
-    local label="$1"
-    local required_regex="$2"
-    local forbidden_regex="$3"
-    local warn_regex="$4"
-    shift 4
-    local out_file="$LOG_BASE/failed/${label}.log"
-    TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
-    echo "[RUN] $*" | tee -a "$out_file"
-    "$@" >> "$out_file" 2>&1
-    local rc=${PIPESTATUS[0]}
-    if [ $rc -ne 0 ]; then
-        FAILED_CHECKS=$((FAILED_CHECKS + 1))
-        record_fail "$label"
-        echo -e "${RED}✗ FAIL${NC}: $label (exit $rc)" | tee -a "$out_file"
-        return $rc
-    fi
-
-    if ! validate_output "$label" "$out_file" "$required_regex" "$forbidden_regex" "$warn_regex"; then
-        FAILED_CHECKS=$((FAILED_CHECKS + 1))
-        record_fail "$label"
-        return 1
-    fi
-
-    PASSED_CHECKS=$((PASSED_CHECKS + 1))
-    # Move to passed directory on success
-    mv "$out_file" "$LOG_BASE/passed/${label}.log"
-    echo -e "${GREEN}✓ PASS${NC}: $label" | tee -a "$LOG_BASE/passed/${label}.log"
-    return 0
+    execute_and_validate "$1" "$2" "$3" "$4" "cmd" "${@:5}"
 }
 
 log_shell_validate() {
-    local label="$1"
-    local required_regex="$2"
-    local forbidden_regex="$3"
-    local warn_regex="$4"
-    local cmd="$5"
-    local out_file="$LOG_BASE/failed/${label}.log"
-    TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
-    echo "[RUN] $cmd" | tee -a "$out_file"
-    bash -c "set -o pipefail; $cmd" >> "$out_file" 2>&1
-    local rc=${PIPESTATUS[0]}
-    if [ $rc -ne 0 ]; then
-        FAILED_CHECKS=$((FAILED_CHECKS + 1))
-        record_fail "$label"
-        echo -e "${RED}✗ FAIL${NC}: $label (exit $rc)" | tee -a "$out_file"
-        return $rc
-    fi
-
-    if ! validate_output "$label" "$out_file" "$required_regex" "$forbidden_regex" "$warn_regex"; then
-        FAILED_CHECKS=$((FAILED_CHECKS + 1))
-        record_fail "$label"
-        return 1
-    fi
-
-    PASSED_CHECKS=$((PASSED_CHECKS + 1))
-    # Move to passed directory on success
-    mv "$out_file" "$LOG_BASE/passed/${label}.log"
-    echo -e "${GREEN}✓ PASS${NC}: $label" | tee -a "$LOG_BASE/passed/${label}.log"
-    return 0
+    execute_and_validate "$1" "$2" "$3" "$4" "shell" "$5"
 }
 
 check_cmd() {
@@ -221,11 +184,12 @@ print_summary() {
     local summary_file="$LOG_BASE/checks.summary.log"
     {
         echo -e "${BLUE}Pre-upgrade checks summary${NC}"
-        echo "Total:   $TOTAL_CHECKS"
-        echo -e "${GREEN}Passed:  $PASSED_CHECKS${NC}"
-        echo -e "${RED}Failed:  $FAILED_CHECKS${NC}"
-        echo -e "${YELLOW}Warnings:$WARNING_CHECKS${NC}"
-        echo "Logs:    $LOG_BASE"
+        echo "Total:        $TOTAL_CHECKS"
+        echo -e "${GREEN}Passed:       $PASSED_CHECKS${NC}"
+        echo -e "${RED}Failed:       $FAILED_CHECKS${NC}"
+        echo -e "${YELLOW}Warnings:     $WARNING_CHECKS${NC}"
+        echo -e "${YELLOW}Empty Output: $EMPTY_OUTPUT_CHECKS${NC}"
+        echo "Logs:         $LOG_BASE"
         echo ""
         echo -e "${YELLOW}IMPORTANT: Please review the failed/warning checks!${NC}"
         echo "Please verify that these checks actually failed and are not false positives."
@@ -238,11 +202,16 @@ print_summary() {
             echo -e "${YELLOW}Warning checks:${NC}"
             printf '  - %s\n' "${WARNING_LABELS[@]}"
         fi
+        if [ ${#EMPTY_OUTPUT_LABELS[@]} -gt 0 ]; then
+            echo -e "${YELLOW}Empty output checks:${NC}"
+            printf '  - %s\n' "${EMPTY_OUTPUT_LABELS[@]}"
+        fi
         echo ""
         echo "Output directory structure:"
-        echo -e "  ${GREEN}Passed:${NC}   $LOG_BASE/passed/"
-        echo -e "  ${RED}Failed:${NC}   $LOG_BASE/failed/"
-        echo -e "  ${YELLOW}Warnings:${NC} $LOG_BASE/warnings/"
+        echo -e "  ${GREEN}Passed:${NC}        $LOG_BASE/passed/"
+        echo -e "  ${RED}Failed:${NC}        $LOG_BASE/failed/"
+        echo -e "  ${YELLOW}Warnings:${NC}      $LOG_BASE/warnings/"
+        echo -e "  ${YELLOW}Empty Output:${NC}  $LOG_BASE/empty_output/"
     } | tee -a "$summary_file"
 }
 
