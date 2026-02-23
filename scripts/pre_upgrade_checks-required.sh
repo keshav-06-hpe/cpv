@@ -370,8 +370,8 @@ fi
 if check_cmd cm; then
     log_cmd "cm_aiops_status" cm aiops status
     log_cmd "cm_aiops_trainer_status" cm aiops trainer status
-    log_cmd "cm_health_alert_s" cm health alert -s
-    log_cmd "cm_health_alert_query" cm health alert query
+    log_cmd "cm_health_alert_s" cm health alertman -s
+    log_cmd "cm_health_alert_query" cm health alertman query
     log_cmd "cm_health_alertman_s" cm health alertman -s
     log_cmd "cm_health_alertman_compute" cm health alertman compute
     log_cmd "cm_health_alertman_fabric" cm health alertman fabric
