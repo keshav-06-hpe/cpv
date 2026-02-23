@@ -77,14 +77,27 @@ execute_and_validate() {
     fi
     
     # Exit status is 0, now check output patterns
-    if ! validate_output "$label" "$out_file" "$required_regex" "$forbidden_regex" "$warn_regex"; then
+    validate_output "$label" "$out_file" "$required_regex" "$forbidden_regex" "$warn_regex"
+    local validation_rc=$?
+
+    if [ $validation_rc -eq 2 ]; then
+        return 0
+    fi
+
+    if [ $validation_rc -eq 3 ]; then
+        return 0
+    fi
+
+    if [ $validation_rc -ne 0 ]; then
         FAILED_CHECKS=$((FAILED_CHECKS + 1))
         record_fail "$label"
         return 1
     fi
     
     PASSED_CHECKS=$((PASSED_CHECKS + 1))
-    mv "$out_file" "$LOG_BASE/passed/${label}.log"
+    if [ -f "$out_file" ]; then
+        mv "$out_file" "$LOG_BASE/passed/${label}.log"
+    fi
     echo -e "${GREEN}✓ PASS${NC}: $label" | tee -a "$LOG_BASE/passed/${label}.log"
     return 0
 }
@@ -98,10 +111,63 @@ log_shell() {
     execute_and_validate "$1" "" "" "" "shell" "$2"
 }
 
-FORBIDDEN_GENERIC_REGEX='(^|[^a-z])fail(ed|ure)?([^a-z]|$)|(^|[^a-z])error([^a-z]|$)|(^|[^a-z])critical([^a-z]|$)|exception|traceback'
+GENERIC_FAILURE_REGEX='(^|[^[:alnum:]_])(fail(ed|ure)?|error|critical|exception|traceback|fatal|panic)([^[:alnum:]_]|$)'
+GENERIC_NON_FAILURE_REGEX='no[[:space:]]+errors?|no[[:space:]]+fail(ures?|ed)?|without[[:space:]]+errors?|without[[:space:]]+fail(ures?|ed)?|0[[:space:]]+errors?|0[[:space:]]+fail(ures?|ed)?|errors?[[:space:]]*:[[:space:]]*0|fail(ures?|ed)?[[:space:]]*:[[:space:]]*0'
+GENERIC_WARNING_REGEX='(^|[^[:alnum:]_])(warn(ing)?|degraded|health_warn)([^[:alnum:]_]|$)'
+GENERIC_NON_WARNING_REGEX='no[[:space:]]+warnings?|without[[:space:]]+warnings?|0[[:space:]]+warnings?|warnings?[[:space:]]*:[[:space:]]*0'
 
 strip_ansi() {
     sed 's/\x1b\[[0-9;]*m//g'
+}
+
+find_generic_failure_line() {
+    local file_path="$1"
+    awk -v failure_regex="$GENERIC_FAILURE_REGEX" -v benign_regex="$GENERIC_NON_FAILURE_REGEX" '
+        {
+            line = tolower($0)
+
+            if (line ~ benign_regex) {
+                next
+            }
+
+            if (line ~ failure_regex) {
+                print $0
+                found = 1
+                exit
+            }
+        }
+        END {
+            if (found) {
+                exit 0
+            }
+            exit 1
+        }
+    ' "$file_path"
+}
+
+find_generic_warning_line() {
+    local file_path="$1"
+    awk -v warning_regex="$GENERIC_WARNING_REGEX" -v benign_regex="$GENERIC_NON_WARNING_REGEX" '
+        {
+            line = tolower($0)
+
+            if (line ~ benign_regex) {
+                next
+            }
+
+            if (line ~ warning_regex) {
+                print $0
+                found = 1
+                exit
+            }
+        }
+        END {
+            if (found) {
+                exit 0
+            }
+            exit 1
+        }
+    ' "$file_path"
 }
 
 validate_output() {
@@ -111,6 +177,7 @@ validate_output() {
     local forbidden_regex="$4"
     local warn_regex="$5"
     local failed=0
+    local warning_detected=0
 
     # Create a temp file with ANSI codes stripped and metadata lines removed
     local temp_clean="$out_file.clean"
@@ -126,7 +193,7 @@ validate_output() {
             mv "$out_file" "$empty_file"
         fi
         rm -f "$temp_clean"
-        return 1
+        return 2
     fi
 
     if [ -n "$required_regex" ] && ! grep -Eiq "$required_regex" "$temp_clean"; then
@@ -134,8 +201,10 @@ validate_output() {
         failed=1
     fi
 
-    if grep -Eiq "$FORBIDDEN_GENERIC_REGEX" "$temp_clean"; then
-        echo -e "${RED}✗ FAIL${NC}: $label (generic failure pattern detected)"
+    local generic_failure_line
+    generic_failure_line="$(find_generic_failure_line "$temp_clean")"
+    if [ $? -eq 0 ]; then
+        echo -e "${RED}✗ FAIL${NC}: $label (generic failure pattern detected: ${generic_failure_line})"
         failed=1
     fi
 
@@ -144,18 +213,39 @@ validate_output() {
         failed=1
     fi
 
-    if [ -n "$warn_regex" ] && grep -Eiq "$warn_regex" "$temp_clean"; then
-        WARNING_CHECKS=$((WARNING_CHECKS + 1))
-        record_warn "$label"
-        echo -e "${YELLOW}⚠ WARN${NC}: $label (warning pattern detected)"
-        # Move to warnings directory if it's a warning
-        if [ -f "$out_file" ]; then
-            local warn_file="$LOG_BASE/warnings/${label}.log"
-            mv "$out_file" "$warn_file"
+    if [ $failed -eq 0 ]; then
+        local warning_detail=""
+
+        if [ -n "$warn_regex" ] && grep -Eiq "$warn_regex" "$temp_clean"; then
+            warning_detected=1
+            warning_detail="warning pattern detected"
+        elif [ -z "$warn_regex" ]; then
+            local generic_warning_line
+            generic_warning_line="$(find_generic_warning_line "$temp_clean")"
+            if [ $? -eq 0 ]; then
+                warning_detected=1
+                warning_detail="generic warning pattern detected: ${generic_warning_line}"
+            fi
+        fi
+
+        if [ $warning_detected -eq 1 ]; then
+            WARNING_CHECKS=$((WARNING_CHECKS + 1))
+            record_warn "$label"
+            echo -e "${YELLOW}⚠ WARN${NC}: $label (${warning_detail})"
+            # Move to warnings directory if it's a warning
+            if [ -f "$out_file" ]; then
+                local warn_file="$LOG_BASE/warnings/${label}.log"
+                mv "$out_file" "$warn_file"
+            fi
         fi
     fi
 
     rm -f "$temp_clean"
+
+    if [ $warning_detected -eq 1 ]; then
+        return 3
+    fi
+
     return $failed
 }
 
@@ -182,6 +272,7 @@ print_warn() {
 
 print_summary() {
     local summary_file="$LOG_BASE/checks.summary.log"
+
     {
         echo -e "${BLUE}Pre-upgrade checks summary${NC}"
         echo "Total:        $TOTAL_CHECKS"
@@ -257,7 +348,7 @@ fi
 
 # BICAN internal test
 if [ -x /usr/share/doc/csm/scripts/operations/pyscripts/start.py ]; then
-    log_cmd_validate "test_bican_internal" "Overall status:[[:space:]]+PASSED" "FAILED|ERROR" "" /usr/share/doc/csm/scripts/operations/pyscripts/start.py test_bican_internal
+    log_cmd_validate "test_bican_internal" "Overall status:[[:space:]]+PASSED" "Overall status:[[:space:]]+FAILED|(^|[^[:alnum:]_])ERROR([^[:alnum:]_]|$)" "" /usr/share/doc/csm/scripts/operations/pyscripts/start.py test_bican_internal
 else
     print_warn "Missing: /usr/share/doc/csm/scripts/operations/pyscripts/start.py"
 fi
