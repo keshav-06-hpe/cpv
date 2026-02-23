@@ -170,6 +170,58 @@ find_generic_warning_line() {
     ' "$file_path"
 }
 
+find_sat_error_count_failure_line() {
+    local file_path="$1"
+    awk '
+        function trim(s) {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+            return s
+        }
+
+        {
+            line = $0
+            lower_line = tolower(line)
+
+            if (!header_found && lower_line ~ /error[[:space:]]+count/) {
+                column_count = split(line, header_cols, /[[:space:]]{2,}|\t+/)
+                for (i = 1; i <= column_count; i++) {
+                    col_name = tolower(trim(header_cols[i]))
+                    gsub(/[[:space:]]+/, " ", col_name)
+                    if (col_name == "error count") {
+                        error_col_index = i
+                        header_found = 1
+                        break
+                    }
+                }
+                next
+            }
+
+            if (header_found) {
+                if (line ~ /^[[:space:]]*$/) {
+                    next
+                }
+
+                row_col_count = split(line, row_cols, /[[:space:]]{2,}|\t+/)
+                if (error_col_index > 0 && row_col_count >= error_col_index) {
+                    error_count_value = trim(row_cols[error_col_index])
+                    if (error_count_value ~ /^[0-9]+$/ && error_count_value > 0) {
+                        print line
+                        found = 1
+                        exit
+                    }
+                }
+            }
+        }
+
+        END {
+            if (found) {
+                exit 0
+            }
+            exit 1
+        }
+    ' "$file_path"
+}
+
 validate_output() {
     local label="$1"
     local out_file="$2"
@@ -201,11 +253,22 @@ validate_output() {
         failed=1
     fi
 
-    local generic_failure_line
-    generic_failure_line="$(find_generic_failure_line "$temp_clean")"
-    if [ $? -eq 0 ]; then
-        echo -e "${RED}✗ FAIL${NC}: $label (generic failure pattern detected: ${generic_failure_line})"
-        failed=1
+    if [[ "$label" != sat_status_* ]]; then
+        local generic_failure_line
+        generic_failure_line="$(find_generic_failure_line "$temp_clean")"
+        if [ $? -eq 0 ]; then
+            echo -e "${RED}✗ FAIL${NC}: $label (generic failure pattern detected: ${generic_failure_line})"
+            failed=1
+        fi
+    fi
+
+    if [[ "$label" == sat_status_* ]]; then
+        local sat_error_count_failure_line
+        sat_error_count_failure_line="$(find_sat_error_count_failure_line "$temp_clean")"
+        if [ $? -eq 0 ]; then
+            echo -e "${RED}✗ FAIL${NC}: $label (sat Error Count > 0: ${sat_error_count_failure_line})"
+            failed=1
+        fi
     fi
 
     if [ -n "$forbidden_regex" ] && grep -Eiq "$forbidden_regex" "$temp_clean"; then
