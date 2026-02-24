@@ -329,7 +329,6 @@ print_info() {
 }
 
 print_warn() {
-    WARNING_CHECKS=$((WARNING_CHECKS + 1))
     echo -e "${YELLOW}[WARN]${NC} $1" | tee -a "$LOG_BASE/checks.info.log"
 }
 
