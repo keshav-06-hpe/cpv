@@ -520,6 +520,13 @@ fi
 if check_cmd kubectl; then
     log_cmd "sma_aiops_config" kubectl describe cm -n sma aiops-enable-disable-models
 fi
+
+if [ -x /opt/cray/tests/sma/resources/healthcheck//sma_healthcheck.sh ]; then
+    log_cmd "sma_healthcheck" /opt/cray/tests/sma/resources/healthcheck//sma_healthcheck.sh
+else
+    print_warn "Missing: /opt/cray/tests/sma/resources/healthcheck//sma_healthcheck.sh"
+fi
+
 if check_cmd cm; then
     log_cmd "cm_aiops_status" cm aiops status
     log_cmd "cm_aiops_trainer_status" cm aiops trainer status
@@ -534,6 +541,9 @@ if check_cmd cm; then
     log_cmd "cm_health_alertman_aiops" cm health alertman aiops
     log_cmd "cm_health_alertman_crayalerts" cm health alertman crayalerts
     log_cmd "cm_health_alertman_cooldev" cm health alertman cooldev
+    log_cmd "cm_health_alertman_slingshot" cm health alertman slingshot
+    log_cmd "cm_health_alertman_node" cm health alertman node
+    log_cmd "cm_health_alertman_redfish" cm health alertman redfish
     log_cmd "cm_health_alertman_query" cm health alertman query
 fi
 
