@@ -11,7 +11,7 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-LOG_DIR="/opt/cray/tests/cpv"
+LOG_DIR="/etc/cray/upgrade/csm//cpv"
 mkdir -p "$LOG_DIR"
 LOG_BASE="${LOG_DIR}/checks_required_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOG_BASE"
