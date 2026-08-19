@@ -11,7 +11,7 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-LOG_DIR="/etc/cray/upgrade/csm//cpv"
+LOG_DIR="/etc/cray/upgrade/csm/healthcheck"
 mkdir -p "$LOG_DIR"
 LOG_BASE="${LOG_DIR}/checks_required_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOG_BASE"
@@ -19,6 +19,20 @@ mkdir -p "$LOG_BASE/passed"
 mkdir -p "$LOG_BASE/failed"
 mkdir -p "$LOG_BASE/warnings"
 mkdir -p "$LOG_BASE/empty_output"
+
+# Check CSM version installed
+CSM_VERSION=$(kubectl get cm -n services cray-product-catalog -o json | jq -r .data.csm | sed -n -e 's/://' -e '/^[0-9]/p' | tail -1)
+if [[ "$CSM_VERSION" == *"1.7"* ]]; then
+    CSM=1.7
+elif [[ "$CSM_VERSION" == *"1.6"* ]]; then
+    CSM=1.6
+elif [[ "$CSM_VERSION" == *"1.5"* ]]; then
+    CSM=1.5
+elif [[ "$CSM_VERSION" == *"1.4"* ]]; then
+    CSM=1.4
+else
+    CSM=$CSM_VERSION
+fi
 
 # Counters
 TOTAL_CHECKS=0
@@ -253,7 +267,7 @@ validate_output() {
         failed=1
     fi
 
-    if [[ "$label" != sat_status_* ]]; then
+    if [[ "$label" != sat_status_* && "$label" != slingshot_fmn_show_status* ]]; then
         local generic_failure_line
         generic_failure_line="$(find_generic_failure_line "$temp_clean")"
         if [ $? -eq 0 ]; then
@@ -310,6 +324,90 @@ validate_output() {
     fi
 
     return $failed
+}
+
+rename-function () 
+{ 
+    eval "$2() $(declare -pf $1 | tail -n +2)"
+    unset -f $1
+}
+
+# Could move these to top of the script, or in some way make them configurable.
+CERT_FAIL_THRESHOLD_DAYS=30
+CERT_WARN_THRESHOLD_DAYS=120
+
+parse-kubeadm-output() {
+    # Isolate the first field, i.e. the name of the certificate, and the "EXPIRES" field.
+    # Since EXPIRES is a date that can have spaces, we want to use the field size based
+    # on the header, looking specifically for the "EXPIRES" heading.
+    <"$1" awk '/MISSING|WARNING|PASS|FAIL|^ *$/ { next }
+         / EXPIRES / {
+             estart = index($0, "EXPIRES ")
+             $0 = substr($0, estart)
+             sub(/  [A-Z].*/, " ")
+             elen = length($0)
+             next
+         }
+         { system(sprintf("date --date=\"%s\" +%s=%%s", substr($0, estart, elen), $1)); }'
+}
+    
+validate_cert_expiration() {
+    local SecondsPerDay=86400
+    local label="$1" sublabel="${2:+ $2}" days=$[($3 - $4) / SecondsPerDay] ret=0
+    if (( days <= 0 )); then
+        echo -e "${RED}✗ FAIL${NC}: $label (Certificate${sublabel} expired $[-days] days ago)"
+        ret=1
+    elif ((days < CERT_FAIL_THRESHOLD_DAYS)); then
+        echo -e "${RED}✗ FAIL${NC}: $label (Certificate${sublabel} will expire in $days days)"
+        ret=1
+    elif ((days < CERT_WARN_THRESHOLD_DAYS)); then
+        WARNING_CHECKS=$((WARNING_CHECKS + 1))
+        record_warn "$label${2:+_$2}"
+        echo -e "${YELLOW}⚠ WARN${NC}: $label (Certificate${sublabel} will expire in $days days)"
+        ret=2
+    fi
+    return $ret
+}
+    
+validate_certificate() {
+    local label="$1" out_file="$2" ret=0 now=$(date +%s)
+    local temp_clean="$out_file.clean"
+    strip_ansi < "$out_file" | grep -vE '^\[RUN\]|^✓ PASS|^✗ FAIL|^⚠ EMPTY|^⚠ WARN' > "$temp_clean"
+
+    if ! grep -q "[^[:space:]]" "$temp_clean"; then
+        EMPTY_OUTPUT_CHECKS=$((EMPTY_OUTPUT_CHECKS + 1))
+        record_empty "$label"
+        echo -e "${YELLOW}⚠ EMPTY${NC}: $label (no command output)"
+        # Move to empty_output directory
+        test -f "$out_file" && mv "$out_file" "$LOG_BASE/empty_output/${label}.log"
+        ret=2
+    else
+        local notAfter=$(sed -n -e 's/"//g' -e 's/^ *[nN]ot *[aA]fter *[:=] *//p' < $temp_clean)
+        if [ -z "$notAfter" ]; then
+            if grep -q "CERTIFICATE  *EXPIRES" $temp_clean; then
+                # Looks like "kubeadm certs check-expiration" output
+                for i in $(parse-kubeadm-output $temp_clean); do
+                    name=$(awk -F= '{print $1}' <<<"$i")
+                    seconds=$(awk -F= '{print $2}' <<<"$i")
+                    validate_cert_expiration $label $name $seconds $now
+                    r=$?; ((ret==0)) && ret=$r
+                done
+            else
+                # Could not find the certificate expiration
+                echo -e "${RED}✗ FAIL${NC}: $label (Could not find certificate expiration)"
+                ret=1
+            fi
+        else
+            validate_cert_expiration "$label" "" $(date --date="$notAfter" +%s) $now
+            ret=$?
+        fi
+    fi
+    if (( ret == 2 )); then
+        # Found a warning.
+        [ -f $out_file ] && mv $out_file "$LOG_BASE/warnings/${label}.log"
+    fi
+    rm -f "$temp_clean"
+    return $ret
 }
 
 log_cmd_validate() {
@@ -369,6 +467,21 @@ print_summary() {
 }
 
 print_info "Pre-upgrade checks started at $(date)"
+print_info "Logs saved under: $LOG_BASE"
+
+
+# Kubectl node status
+if check_cmd kubectl; then
+    log_shell_validate "kubectl_get_nodes_ready" "Ready" "SchedulingDisabled" "" "kubectl get nodes"
+fi
+
+# Network interface checks
+if check_cmd pdsh; then
+    log_shell_validate "pdsh_ip_a_mgmt_NO_CARRIER" "" "NO-CARRIER" "" "pdsh -w $(echo $(ceph orch host ls | grep ncn | cut -f1 -d" " | xargs) $(kubectl get nodes | grep ncn | cut -f1 -d" " | xargs) | sed 's/ /,/g') 'ip a | grep mgmt' | sort"
+    log_shell_validate "pdsh_ip_a_hsn_NO_CARRIER" "" "NO-CARRIER" "" "pdsh -w $(echo $(kubectl get nodes | grep ncn-w | cut -f1 -d" " | xargs) | sed 's/ /,/g') 'ip a | grep hsn| grep -v inet' | sort"
+    log_shell_validate "pdsh_ip_a_tmp" "" "tmp" "" "pdsh -w $(echo $(kubectl get nodes | grep ncn-w | cut -f1 -d" " | xargs) | sed 's/ /,/g') 'ip a | grep tmp' | sort"
+    #log_shell_validate "pdsh_ip_a_sun_NO_CARRIER" "" "NO-CARRIER" "" "pdsh -w $(echo $(ceph orch host ls | grep ncn | cut -f1 -d" " | xargs) $(kubectl get nodes | grep ncn-m | cut -f1 -d" " | xargs) | sed 's/ /,/g') 'ip a | grep sun' | sort"
+fi
 
 # HMS discovery verification scripts
 if [ -x /opt/cray/csm/scripts/hms_verification/hsm_discovery_status_test.sh ]; then
@@ -409,17 +522,22 @@ else
 fi
 
 # BICAN internal test
-if [ -x /usr/share/doc/csm/scripts/operations/pyscripts/start.py ]; then
-    log_cmd_validate "test_bican_internal" "Overall status:[[:space:]]+PASSED" "Overall status:[[:space:]]+FAILED|(^|[^[:alnum:]_])ERROR([^[:alnum:]_]|$)" "" /usr/share/doc/csm/scripts/operations/pyscripts/start.py test_bican_internal
+#if [ -x /usr/share/doc/csm/scripts/operations/pyscripts/start.py ]; then
+#    log_cmd_validate "test_bican_internal" "Overall status:[[:space:]]+PASSED" "Overall status:[[:space:]]+FAILED|(^|[^[:alnum:]_])ERROR([^[:alnum:]_]|$)" "" /usr/share/doc/csm/scripts/operations/pyscripts/start.py test_bican_internal
+#else
+#    print_warn "Missing: /usr/share/doc/csm/scripts/operations/pyscripts/start.py"
+#fi
+if [ -x ssh-test.py ]; then
+    log_cmd_validate "test_bican_internal" "Overall status:[[:space:]]+PASSED" "Overall status:[[:space:]]+FAILED|(^|[^[:alnum:]_])ERROR([^[:alnum:]_]|$)" "" ./ssh-test.py
 else
     print_warn "Missing: /usr/share/doc/csm/scripts/operations/pyscripts/start.py"
 fi
 
 # Slingshot fabric manager deep checks
 if check_cmd kubectl; then
-    log_shell_validate "slingshot_fmn_show_status" "Runtime:HEALTHY" "Ports in Error State:[[:space:]]*[1-9]" "Downed links:" "kubectl exec -i -n services \$(kubectl get pods -A | grep slingshot-fabric-manager | awk '{print \$2}' | head -1) -- fmn-show-status --detail"
-    log_shell_validate "slingshot_linkdbg_fabric" "" "" "Action code|PROBLEM SYNOPSIS|unkn_port|downed links" "kubectl exec -i -n services \$(kubectl get pods -A | grep slingshot-fabric-manager | awk '{print \$2}' | head -1) -- linkdbg -L fabric"
-    log_shell_validate "slingshot_linkdbg_edge" "" "" "Action code|PROBLEM SYNOPSIS|unkn_port|downed links" "kubectl exec -i -n services \$(kubectl get pods -A | grep slingshot-fabric-manager | awk '{print \$2}' | head -1) -- linkdbg -L edge"
+    log_shell_validate "slingshot_fmn_show_status" "Runtime:HEALTHY" "Ports in Error State:[[:space:]]*[1-9]" "[1-9][0-9]*[[:space:]]Downed links:" "kubectl exec -i -n services \$(kubectl get pods -A | grep slingshot-fabric-manager | awk '{print \$2}' | head -1) -- fmn-show-status --detail"
+    log_shell_validate "slingshot_linkdbg_fabric" "" "" "Action code|PROBLEM SYNOPSIS|unkn_port|Querying downed links" "kubectl exec -i -n services \$(kubectl get pods -A | grep slingshot-fabric-manager | awk '{print \$2}' | head -1) -- linkdbg -L fabric"
+    log_shell_validate "slingshot_linkdbg_edge" "" "" "Action code|PROBLEM SYNOPSIS|unkn_port|Querying downed links" "kubectl exec -i -n services \$(kubectl get pods -A | grep slingshot-fabric-manager | awk '{print \$2}' | head -1) -- linkdbg -L edge"
     log_shell_validate "slingshot_show_flaps" "" "" "Showing [1-9][0-9]* links with a flap score" "kubectl exec -i -n services \$(kubectl get pods -A | grep slingshot-fabric-manager | awk '{print \$2}' | head -1) -- show-flaps"
 fi
 
@@ -445,6 +563,12 @@ if check_cmd kubectl; then
     log_cmd_validate "kubectl_top_pods_mem_containers" "" "" "metrics API not available|not found|Error from server" kubectl top pods -A --sort-by=memory --containers=true
 fi
 
+# Node resource usage
+if check_cmd kubectl; then
+    log_cmd_validate "kubectl_top_node_cpu" "" "" "metrics API not available|not found|Error from server" kubectl top nodes --sort-by=cpu 
+    log_cmd_validate "kubectl_top_nodes_mem" "" "" "metrics API not available|not found|Error from server" kubectl top nodes --sort-by=memory 
+fi
+
 # SAT status and inventory
 if check_cmd sat; then
     log_cmd_validate "sat_status_ChassisBMC" "" "" "FAILED|Degraded" sat status --types ChassisBMC
@@ -459,8 +583,9 @@ if check_cmd sat; then
     log_cmd "sat_showrev" sat showrev
     log_cmd "sat_firmware" sat firmware
     log_cmd "sat_hwinv" sat hwinv
-    log_cmd "sat_hwmatch" sat hwmatch
-    log_cmd "sat_slscheck" sat slscheck
+    log_cmd_validate "sat_hwmatch" "" "" "EMPTY|MISSING" sat hwmatch
+    #log_cmd "sat_slscheck" sat slscheck
+    log_cmd_validate "sat_slscheck" "" "" "mismatch|missing| 0 \(" sat slscheck
     log_cmd "sat_status_compute_enabled_notready" sat status --filter role=compute --filter enabled=true --filter state!=ready
     log_cmd "sat_status_compute_enabled_off" sat status --filter role=compute --filter enabled=true --filter state=off
     log_cmd "sat_status_compute_enabled_on" sat status --filter role=compute --filter enabled=true --filter state=on
@@ -475,8 +600,19 @@ fi
 
 # Crash dump inventory on NCNs
 if check_cmd pdsh; then
-    log_shell "pdsh_ls_var_crash" "pdsh -w ncn-m00[1-3],ncn-w0[01-30],ncn-s0[01-18] 'ls -l /var/crash' | dshbak -c"
+    log_shell "pdsh_ls_var_crash" "pdsh -w $(echo $(ceph orch host ls | grep ncn | cut -f1 -d" " | xargs) $(kubectl get nodes | grep ncn | cut -f1 -d" " | xargs) | sed 's/ /,/g') 'ls -l /var/crash' | dshbak -c"
 fi
+
+# ARP cache tuning consistency checks on NCNs
+if check_cmd pdsh; then
+    log_shell "pdsh_sysctl_ipv4_neigh_default_gc_thresh" "pdsh -w $(echo $(ceph orch host ls | grep ncn | cut -f1 -d" " | xargs) $(kubectl get nodes | grep ncn | cut -f1 -d" " | xargs) | sed 's/ /,/g') 'sysctl -a | grep net.ipv4.neigh.default.gc_thresh' | dshbak -c"
+    log_shell "pdsh_sysctl_ipv4_neigh_default_gc_stale_time" "pdsh -w $(echo $(ceph orch host ls | grep ncn | cut -f1 -d" " | xargs) $(kubectl get nodes | grep ncn | cut -f1 -d" " | xargs) | sed 's/ /,/g') 'sysctl -a | grep net.ipv4.neigh.default.gc_stale_time' | dshbak -c"
+    log_shell "pdsh_sysctl_ipv4_neigh_default_base_reachable_time_ms" "pdsh -w $(echo $(ceph orch host ls | grep ncn | cut -f1 -d" " | xargs) $(kubectl get nodes | grep ncn | cut -f1 -d" " | xargs) | sed 's/ /,/g') 'sysctl -a | grep net.ipv4.neigh.default.base_reachable_time_ms' | dshbak -c"
+    log_shell "pdsh_sysctl_ipv6_neigh_default_gc_thresh" "pdsh -w $(echo $(ceph orch host ls | grep ncn | cut -f1 -d" " | xargs) $(kubectl get nodes | grep ncn | cut -f1 -d" " | xargs) | sed 's/ /,/g') 'sysctl -a | grep net.ipv6.neigh.default.gc_thresh' | dshbak -c"
+    log_shell "pdsh_sysctl_ipv6_route_gc_thresh" "pdsh -w $(echo $(ceph orch host ls | grep ncn | cut -f1 -d" " | xargs) $(kubectl get nodes | grep ncn | cut -f1 -d" " | xargs) | sed 's/ /,/g') 'sysctl -a | grep net.ipv6.route.gc_thresh' | dshbak -c"
+    log_shell "pdsh_sysctl_ipv6_xfrm6_gc_thresh" "pdsh -w $(echo $(ceph orch host ls | grep ncn | cut -f1 -d" " | xargs) $(kubectl get nodes | grep ncn | cut -f1 -d" " | xargs) | sed 's/ /,/g') 'sysctl -a | grep net.ipv6.xfrm6_gc_thresh' | dshbak -c"
+fi
+
 
 # Cassini NIC firmware (management nodes)
 if check_cmd pdsh; then
@@ -496,12 +632,15 @@ if check_cmd sdu; then
     log_cmd "rda_conf" sdu bash cat /etc/rda/rda.conf
     log_cmd "rda_acl" sdu bash cat /etc/rda/acl-rda.dat
     log_cmd "rda_hosts" sdu bash cat /etc/hosts
+else
+    print_warn "Missing: sdu command not found"
 fi
 
 # Namespace/pod resource limits
 if check_cmd kubectl && check_cmd jq; then
     log_shell "namespace_resource_limits" "kubectl describe namespace"
     log_shell "pod_resource_limits" "kubectl get pod --all-namespaces --sort-by='.metadata.name' -o json | jq -r '[.items[] | {pod_name: .metadata.name, containers: .spec.containers[] | [ {container_name: .name, cpu_limits: .resources.limits.cpu, cpu_requested: .resources.requests.cpu, memory_limits: .resources.limits.memory, memory_requested: .resources.requests.memory} ] }]' | jq 'sort_by(.containers[0].cpu_requested)'"
+    log_shell "query_resource_limits" "./query_rl.sh -c"
 fi
 
 # OOM events
@@ -511,56 +650,86 @@ fi
 
 # Describe nodes, allocated resources, conditions
 if check_cmd kubectl; then
-    log_shell "kubectl_describe_nodes" "for node in \$(kubectl get nodes | grep ncn | awk '{print \$1}'); do echo \$node; kubectl describe node \$node; done"
+    log_shell "kubectl_describe_nodes" "for node in \$(kubectl get nodes | grep ncn | awk '{print \$1}'); do echo kubectl-describe-node=\$node; kubectl describe node \$node; done"
     log_shell "kubectl_allocated_resources" "for node in \$(kubectl get nodes | grep ncn | awk '{print \$1}'); do echo \$node; kubectl describe node \$node | grep Resource -A 6; done"
     log_shell "kubectl_node_conditions" "for node in \$(kubectl get nodes | grep ncn | awk '{print \$1}'); do echo \$node; kubectl describe node \$node | grep LastHeartbeatTime -A 8; done"
 fi
 
 # SMA AIOPS and alert health
 if check_cmd kubectl; then
-    log_cmd "sma_aiops_config" kubectl describe cm -n sma aiops-enable-disable-models
+    # only for CSM 1.5 and higher
+    if [[ $CSM == "1.5" || $CSM == "1.6" || $CSM == "1.7" ]]; then
+        log_cmd "sma_aiops_config" kubectl describe cm -n sma aiops-enable-disable-models
+    fi
 fi
 
-if [ -x /opt/cray/tests/sma/resources/healthcheck//sma_healthcheck.sh ]; then
-    log_cmd "sma_healthcheck" /opt/cray/tests/sma/resources/healthcheck//sma_healthcheck.sh
+if [ -x /opt/cray/tests/sma/resources/healthcheck/sma_healthcheck.sh ]; then
+    log_cmd "sma_healthcheck" /opt/cray/tests/sma/resources/healthcheck/sma_healthcheck.sh
 else
-    print_warn "Missing: /opt/cray/tests/sma/resources/healthcheck//sma_healthcheck.sh"
+    print_warn "Missing: /opt/cray/tests/sma/resources/healthcheck/sma_healthcheck.sh"
 fi
 
 if check_cmd cm; then
-    log_cmd "cm_aiops_status" cm aiops status
-    log_cmd "cm_aiops_trainer_status" cm aiops trainer status
-    log_cmd "cm_health_alert_s" cm health alertman -s
-    log_cmd "cm_health_alert_query" cm health alertman query
-    log_cmd "cm_health_alertman_s" cm health alertman -s
-    log_cmd "cm_health_alertman_compute" cm health alertman compute
-    log_cmd "cm_health_alertman_fabric" cm health alertman fabric
-    log_cmd "cm_health_alertman_prometheus" cm health alertman prometheus
-    log_cmd "cm_health_alertman_slingshothsn" cm health alertman slingshothsn
-    log_cmd "cm_health_alertman_slingshotswitch" cm health alertman slingshotswitch
-    log_cmd "cm_health_alertman_aiops" cm health alertman aiops
-    log_cmd "cm_health_alertman_crayalerts" cm health alertman crayalerts
-    log_cmd "cm_health_alertman_cooldev" cm health alertman cooldev
-    log_cmd "cm_health_alertman_slingshot" cm health alertman slingshot
-    log_cmd "cm_health_alertman_node" cm health alertman node
-    log_cmd "cm_health_alertman_redfish" cm health alertman redfish
-    log_cmd "cm_health_alertman_query" cm health alertman query
+    # only for CSM 1.5
+    if [ $CSM == "1.5" ]; then
+        log_cmd "cm_health_alert_s" cm health alert -s
+        log_cmd "cm_health_alert_query" cm health alert query
+    fi
+    # only for CSM 1.6
+    if [ $CSM == "1.6" ]; then
+        log_cmd_validate "cm_aiops_status" "" "is not running" "" cm aiops status
+        log_cmd_validate "cm_aiops_fabric_status" "" "is disabled" ""cm aiops fabric status
+        log_cmd_validate "cm_aiops_forecast_status" "" "is disabled" ""cm aiops forecast status
+        log_cmd_validate "cm_aiops_trainer_status" "" "is not running" ""cm aiops trainer status
+        log_cmd "cm_health_alertman_compute" cm health alertman compute
+        log_cmd "cm_health_alertman_fabric" cm health alertman fabric
+        log_cmd "cm_health_alertman_prometheus" cm health alertman prometheus
+        log_cmd "cm_health_alertman_slingshothsn" cm health alertman slingshothsn
+        log_cmd "cm_health_alertman_slingshotswitch" cm health alertman slingshotswitch
+        log_cmd "cm_health_alertman_aiops" cm health alertman aiops
+        log_cmd "cm_health_alertman_crayalerts" cm health alertman crayalerts
+        log_cmd "cm_health_alertman_cooldev" cm health alertman cooldev
+        log_cmd "cm_health_alertman_query" cm health alertman query
+    fi
+    # only for CSM 1.7
+    if [ $CSM == "1.7" ]; then
+        log_cmd_validate "cm_aiops_status" "" "is not running" "" cm aiops status
+        log_cmd_validate "cm_aiops_fabric_status" "" "is disabled" ""cm aiops fabric status
+        log_cmd_validate "cm_aiops_forecast_status" "" "is disabled" ""cm aiops forecast status
+        log_cmd_validate "cm_aiops_trainer_status" "" "is not running" ""cm aiops trainer status
+        log_cmd "cm_health_alertman_compute" cm health alertman compute
+        log_cmd "cm_health_alertman_fabric" cm health alertman fabric
+        log_cmd "cm_health_alertman_prometheus" cm health alertman prometheus
+        log_cmd "cm_health_alertman_slingshothsn" cm health alertman slingshothsn
+        log_cmd "cm_health_alertman_slingshotswitch" cm health alertman slingshotswitch
+        log_cmd "cm_health_alertman_aiops" cm health alertman aiops
+        log_cmd "cm_health_alertman_crayalerts" cm health alertman crayalerts
+        log_cmd "cm_health_alertman_cooldev" cm health alertman cooldev
+        log_cmd "cm_health_alertman_query" cm health alertman query
+        log_cmd "cm_health_alertman_slingshot" cm health alertman slingshot
+        log_cmd "cm_health_alertman_node" cm health alertman node
+        log_cmd "cm_health_alertman_redfish" cm health alertman redfish
+    fi
 fi
 
 # BOS/CFS options
 if check_cmd cray; then
     log_cmd "cray_bos_v2_options" cray bos v2 options list
     log_cmd "cray_cfs_options" cray cfs options list
-    log_cmd "cray_cfs_v3_options" cray cfs v3 options list
+    # only for CSM 1.5 and higher
+    if [[ $CSM == "1.5" || $CSM == "1.6" || $CSM == "1.7" ]]; then
+        log_cmd "cray_cfs_v3_options" cray cfs v3 options list
+    fi
 fi
 
 # CFS batcher config and logs
 if check_cmd kubectl; then
-    log_cmd "cfs_default_ansible_cfg" kubectl describe cm -n services cfs-default-ansible-cfg
+    #log_cmd "cfs_default_ansible_cfg" kubectl describe cm -n services cfs-default-ansible-cfg
+    log_shell "cfs_default_ansible_cfg" "kubectl describe cm -n services cfs-default-ansible-cfg | grep -v 'WARNING: Changing some of these values'"
     log_shell "cfs_sorted_pods" "kubectl -n services --sort-by=.metadata.creationTimestamp get pods | grep cfs"
     log_shell "cfs_successful_jobs" "kubectl get jobs -n services --field-selector status.successful=1 -l cfsversion --sort-by=.metadata.creationTimestamp"
     log_shell "cfs_batcher_logs" "kubectl logs -n services \$(kubectl get pods -o wide -n services | grep cray-cfs-batcher | awk '{print \$1}' | head -1)"
-    log_shell "cfs_batch_pods_logs" "for i in \$(kubectl -n services --sort-by=.metadata.creationTimestamp get pods | grep cfs | grep -v Running | awk '{print \$1}'); do kubectl logs -n services --timestamps -c ansible \$i; done"
+    log_shell "cfs_batch_pods_logs" "for i in \$(kubectl -n services --sort-by=.metadata.creationTimestamp get pods | grep cfs | egrep -v \"Running|Completed\" | awk '{print \$1}'); do echo cfs-pod=\$i; kubectl logs -n services --timestamps -c ansible \$i; done"
 fi
 
 # Nexus backup and space usage
@@ -581,9 +750,14 @@ if check_cmd pdsh; then
     log_shell "etcd_endpoint_health" "pdsh -w ncn-m00[1-3] 'etcdctl --endpoints https://127.0.0.1:2379 --cert /etc/kubernetes/pki/etcd/peer.crt --key /etc/kubernetes/pki/etcd/peer.key --cacert /etc/kubernetes/pki/etcd/ca.crt endpoint health' | dshbak -c"
 fi
 
+# For certificate checking, replace the normal validate_output function:
+rename-function validate_output validate_output-SAVE
+rename-function validate_certificate validate_output
+
 # Certificate checks
 if check_cmd kubectl && check_cmd jq && check_cmd openssl; then
-    log_shell "cert_spire_intermediate" "kubectl get secret -n spire spire.spire.ca-tls -o json | jq -r '.data.\"tls.crt\" | @base64d' | openssl x509 -noout -enddate"
+    #log_shell "cert_spire_intermediate" "kubectl get secret -n spire spire.spire.ca-tls -o json | jq -r '.data.\"tls.crt\" | @base64d' | openssl x509 -noout -enddate"
+    log_shell "cert_spire_intermediate" "kubectl get secret -n spire spire.spire.ca-tls -o jsonpath=\"{.data.tls\.crt}\" | base64 -d | openssl x509 -noout -enddate"
     log_shell "cert_kube_etcdbackup" "kubectl get secret -n kube-system kube-etcdbackup-etcd -o json | jq -r '.data.\"tls.crt\" | @base64d' | openssl x509 -noout -enddate"
     log_shell "cert_etcd_ca" "kubectl get secret -n sysmgmt-health etcd-client-cert -o json | jq -r '.data.\"etcd-ca\" | @base64d' | openssl x509 -noout -enddate"
     log_shell "cert_etcd_client" "kubectl get secret -n sysmgmt-health etcd-client-cert -o json | jq -r '.data.\"etcd-client\" | @base64d' | openssl x509 -noout -enddate"
@@ -598,22 +772,58 @@ if check_cmd kubectl && check_cmd jq && check_cmd openssl; then
     log_shell "cert_sma_timescaledb" "kubectl -n sma get secret sma-timescaledb-single-certificate -o json | jq -r '.data.\"tls.crt\"' | base64 -d | openssl x509 -noout -enddate"
     log_shell "cert_sma_cluster_operator" "kubectl -n sma get secret cluster-cluster-operator-certs -o json | jq -r '.data.\"cluster-operator.crt\"' | base64 -d | openssl x509 -noout -enddate"
     log_shell "cert_sma_kafka_exporter" "kubectl -n sma get secret cluster-kafka-exporter-certs -o json | jq -r '.data.\"kafka-exporter.crt\"' | base64 -d | openssl x509 -noout -enddate"
-    log_shell "cert_sma_entity_operator" "kubectl -n sma get secret cluster-entity-topic-operator-certs -o json | jq -r '.data.\"entity-operator.crt\"' | base64 -d | openssl x509 -noout -enddate"
+    # CSM 1.5 and earlier
+    if [[ $CSM == "1.4" || $CSM == "1.5" ]]; then
+        log_shell "cert_sma_entity_operator" "kubectl -n sma get secret cluster-entity-operator-certs -o json | jq -r '.data.\"entity-operator.crt\"' | base64 -d | openssl x509 -noout -enddate"
+    fi
+    # CSM 1.6 and later
+    if [[ $CSM == "1.6" || $CSM == "1.7" ]]; then
+        log_shell "cert_sma_entity_topic_operator" "kubectl -n sma get secret cluster-entity-topic-operator-certs -o json | jq -r '.data.\"entity-operator.crt\"' | base64 -d | openssl x509 -noout -enddate"
+        log_shell "cert_sma_entity_user_operator" "kubectl -n sma get secret cluster-entity-user-operator-certs -o json | jq -rc '.data.\"entity-operator.crt\"' | base64 -d | openssl x509 -noout -enddate"
+    fi
 fi
 
-# Spire certs (pre-1.7)
+# Spire certs (pre-CSM 1.7)
 if check_cmd kubectl; then
-    log_shell "cert_spire_tokens_tls" "kubectl describe certificate -n spire spire-tokens-tls | egrep 'Not Before|Not After|Renewal Time'"
+    # CSM 1.6 and earlier, but not CSM 1.7
+    if [[ $CSM == "1.4" || $CSM == "1.5" || $CSM == "1.6" ]]; then
+        log_shell "cert_spire_tokens_tls" "kubectl describe certificate -n spire spire-tokens-tls | egrep 'Not After'"
+    fi
+    # CSM 1.5 and later
+    if [[ $CSM == "1.5" || $CSM == "1.6" || $CSM == "1.7" ]]; then
+        log_shell "cert_cray_spire_tokens_tls" "kubectl describe certificate -n spire cray-spire-tokens-tls | egrep 'Not After'"
+    fi
 fi
 
 # OAuth2 proxy certs
 if check_cmd kubectl; then
-    log_shell "cert_cray_oauth2_proxies" "kubectl -n services get certificate cray-oauth2-proxies-customer-management -o yaml | egrep 'notAfter|notBefore|renewalTime'; kubectl -n services get certificate cray-oauth2-proxies-customer-high-speed -o yaml | egrep 'notAfter|notBefore|renewalTime'; kubectl -n services get certificate cray-oauth2-proxies-customer-access -o yaml | egrep 'notAfter|notBefore|renewalTime'"
+    log_shell "cert_cray_oauth2_proxies_customer_management" "kubectl -n services get certificate cray-oauth2-proxies-customer-management -o yaml | egrep 'notAfter'"
+    log_shell "cert_cray_oauth2_proxies_customer_high_speed" "kubectl -n services get certificate cray-oauth2-proxies-customer-high-speed -o yaml | egrep 'notAfter'"
+    log_shell "cert_cray_oauth2_proxies_customer_access" "kubectl -n services get certificate cray-oauth2-proxies-customer-access -o yaml | egrep 'notAfter'"
 fi
 
+# slurmdb-ssl and slurmdb-ssl-internal TLS certificates
+if check_cmd kubectl && check_cmd base64  && check_cmd openssl; then
+    log_shell "cert_slurmdb-ssl" "kubectl get secret slurmdb-ssl -n user -o jsonpath=\"{.data.tls\.crt}\" | base64 -d | openssl x509 -noout -enddate"
+    log_shell "cert_slurmdb-ssl-internal" "kubectl get secret slurmdb-ssl-internal -n user -o jsonpath=\"{.data.tls\.crt}\" | base64 -d | openssl x509 -noout -enddate"
+fi
+
+# Now restore the validate_output function
+rename-function validate_output validate_certificate
+rename-function validate_output-SAVE validate_output
+
 # Weave status (CSM 1.6 and earlier)
-if check_cmd pdsh; then
-    log_shell "weave_status" "pdsh -w ncn-m00[1-3] weave --local status connections | dshbak -c"
+if [[ $CSM == "1.4" || $CSM == "1.5" || $CSM == "1.6" ]]; then
+    if check_cmd pdsh; then
+        log_shell "weave_status" "pdsh -w ncn-m00[1-3] weave --local status connections | dshbak -c"
+    fi
+fi
+
+# Cilim status (CSM 1.7 and later)
+if [ $CSM == "1.7" ]; then
+    if check_cmd cilium; then
+        log_shell "cilium_status" "cilium status"
+    fi
 fi
 
 # Node filesystem usage
@@ -631,16 +841,21 @@ fi
 
 # Spire entry counts
 if check_cmd kubectl; then
-    log_shell "spire_entry_count" "kubectl exec -i -n spire cray-spire-server-0 -c spire-server -- /opt/spire/bin/spire-server entry count"
-    log_shell "spire_entry_count_list" "kubectl exec -i -n spire cray-spire-server-0 -c spire-server -- /opt/spire/bin/spire-server entry show | grep 'Entry ID' | wc -l"
+    if [[ $CSM == "1.5" || $CSM == "1.6" || $CSM == "1.7" ]]; then
+        log_shell "spire_entry_count" "kubectl exec -i -n spire cray-spire-server-0 -c spire-server -- /opt/spire/bin/spire-server entry count"
+    fi
+    if [[ $CSM == "1.4" || $CSM == "1.5" || $CSM == "1.6" ]]; then
+        log_shell "spire_entry_count_list" "kubectl exec -i -n spire spire-server-0 -c spire-server -- /opt/spire/bin/spire-server entry show | grep 'Entry ID' | wc -l"
+    fi
 fi
 
 # NCN health checks
 if [ -x /opt/cray/platform-utils/ncnHealthChecks.sh ]; then
-    log_cmd "ncnHealthChecks_all" /opt/cray/platform-utils/ncnHealthChecks.sh
-    log_cmd "ncnHealthChecks_ncn_uptimes" /opt/cray/platform-utils/ncnHealthChecks.sh -s ncn_uptimes
+    log_shell "ncnHealthChecks_all" "/opt/cray/platform-utils/ncnHealthChecks.sh | egrep -v 'PASS or FAIL status returned|No pass or fail status to report|failures and warnings'"
+    log_shell "ncnHealthChecks_ncn_uptimes" "/opt/cray/platform-utils/ncnHealthChecks.sh -s ncn_uptimes | grep -v 'No pass or fail status to report'"
     log_cmd "ncnHealthChecks_node_resource_consumption" /opt/cray/platform-utils/ncnHealthChecks.sh -s node_resource_consumption
     log_cmd "ncnHealthChecks_pods_not_running" /opt/cray/platform-utils/ncnHealthChecks.sh -s pods_not_running
+    log_cmd "ncnHealthChecks_no_wipe_status" /opt/cray/platform-utils/ncnHealthChecks.sh -s no_wipe_status
 else
     print_warn "Missing: /opt/cray/platform-utils/ncnHealthChecks.sh"
 fi
@@ -658,8 +873,11 @@ else
 fi
 
 if [ -x /opt/cray/tests/install/ncn/automated/ncn-k8s-combined-healthcheck ]; then
-    if [ -z "$SW_ADMIN_PASSWORD" ]; then
-        print_warn "SW_ADMIN_PASSWORD not set; ncn-k8s-combined-healthcheck may require switch admin password"
+    # CSM 1.6 and CSM 1.7 usually have the switch admin user password stored in vault so the ENV variable is not needed.
+    if [[ $CSM == "1.4" || $CSM == "1.5" ]]; then
+        if [ -z "$SW_ADMIN_PASSWORD" ]; then
+            print_warn "SW_ADMIN_PASSWORD not set; ncn-k8s-combined-healthcheck may require switch admin password"
+        fi
     fi
     log_cmd "ncn_k8s_combined_healthcheck" /opt/cray/tests/install/ncn/automated/ncn-k8s-combined-healthcheck
 else
@@ -670,6 +888,13 @@ fi
 if check_cmd kubectl; then
     log_cmd "kubectl_get_pods_wide" kubectl get pods -o wide -A
 fi
+
+# Cray CLI token expiration
+if check_cmd pdsh && check_cmd jq; then
+    #log_shell "cray_CLI_token_expiration" "pdsh -w $(kubectl get nodes | grep ncn | cut -f1 -d" " | xargs | sed 's/ /,/g') 'EXPIRES_AT=$(cd /root/.config/cray; cat tokens/api_gw_service_nmn_local.$(cat configurations/$(cat active_config) | grep username | cut -f2 -d"\"") | jq -r .expires_at); date --date=@$EXPIRES_AT' | dshbak -c"
+    log_shell_validate "cray_CLI_token_expiration" "" "No such file or directory" "" "pdsh -w $(kubectl get nodes | awk '/ncn/ {printf "%s,", $1}' | sed 's/,$//') 'EXPIRES_AT=\$(cd /root/.config/cray; cat tokens/api_gw_service_nmn_local.\$(cat configurations/\$(cat active_config) | awk -F\\\" \"/username/ {print \\\$2}\") | jq -r .expires_at); date --date=@\$EXPIRES_AT' | dshbak -c"
+fi
+
 
 print_info "Pre-upgrade checks completed at $(date)"
 print_summary
